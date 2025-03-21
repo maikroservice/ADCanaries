@@ -53,9 +53,6 @@ Usage : ./ADCanaries.ps1  -Populate -Config <Path> -ParentOU <OU> \
                           -GetObjectPropertiesGuids -Output <Path>                  : 'Retreives the schemaIDGuid for attributes of Canaries objectClass and outputs as csv'
 ```
 
-Deployment demonstration video example presented at CORIIN 2023 :
-[![Demo](.resources/images/vid-mini.png)](.resources/videos/ADCanaries-DEMO-CORIIN.mp4)
-
 ### Optional : Auditing existing SACLs within the environment
 
 ``` powershell
