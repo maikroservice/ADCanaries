@@ -301,6 +301,154 @@ function CreateCanary {
     }
 }
 
+function CreateSpecialCanaries {
+    param($SpecialCanaries, $Output, $CanaryGroup, $Owner, $CanaryOU)
+    
+    # Create a dedicated container for special objects
+    $containerName = "PKI-Canaries"
+    
+    # Use the Canary OU path instead
+    $containerPath = "OU=" + $CanaryOU.Name + "," + $CanaryOU.Path
+    Write-Host "[i] Using container path: $containerPath" -ForegroundColor Cyan
+    
+    $containerDN = "CN=$containerName,$containerPath"
+    
+    # Check if container exists
+    $containerExists = $false
+    try {
+        Get-ADObject -Identity $containerDN -ErrorAction Stop
+        $containerExists = $true
+        Write-Host "[+] Special objects container already exists: $containerDN" -ForegroundColor Green
+    } catch {
+        # Create the container
+        try {
+            New-ADObject -Name $containerName -Type "container" -Path $containerPath -Description "Container for special canary objects"
+            Write-Host "[+] Created special objects container: $containerDN" -ForegroundColor Green
+            $containerExists = $true
+            
+            # Wait longer for the container to be available
+            Write-Host "[i] Waiting for container to be available..." -ForegroundColor Cyan
+            Start-Sleep -Seconds 5
+            
+            # Verify the container was created
+            try {
+                $verifyContainer = Get-ADObject -Identity $containerDN -ErrorAction Stop
+                Write-Host "[+] Container verified: $containerDN" -ForegroundColor Green
+            } catch {
+                Write-Host "[!] Container verification failed: $($_.Exception.Message)" -ForegroundColor Red
+                $containerExists = $false
+            }
+        } catch {
+            Write-Host "[!] Failed to create special objects container: $($_.Exception.Message)" -ForegroundColor Red
+            $containerExists = $false
+        }
+    }
+    
+    # Only proceed if container exists
+    if ($containerExists) {
+        # Get all special canaries - PKI templates, domain policies, and other non-standard types
+        $specialTypes = @('pKICertificateTemplate', 'domainPolicy')
+        $specialObjects = $SpecialCanaries | Where-Object { $specialTypes -contains $_.Type }
+        
+        # Create all special objects first
+        $createdSpecialObjects = @()
+        
+        foreach ($specialObject in $specialObjects) {
+            $objectName = $specialObject.Name
+            $objectType = $specialObject.Type
+            $objectDN = "CN=$objectName,$containerDN"
+            
+            Write-Host "[i] Creating special object: $objectName (type: $objectType)" -ForegroundColor Cyan
+            
+            # Check if object already exists
+            $objectExists = $false
+            try {
+                Get-ADObject -Identity $objectDN -ErrorAction Stop
+                $objectExists = $true
+                Write-Host "[-] Special object already exists: $objectDN" -ForegroundColor Yellow
+                $createdSpecialObjects += @{
+                    DN = $objectDN
+                    Name = $objectName
+                    Type = $objectType
+                }
+            } catch {
+                $objectExists = $false
+            }
+            
+            if (-not $objectExists) {
+                try {
+                    # Create the placeholder container
+                    New-ADObject -Name $objectName -Type "container" -Path $containerDN -Description "$($specialObject.Description) (placeholder for $objectType)"
+                    Write-Host "[+] Created placeholder for $objectType : $objectDN" -ForegroundColor Green
+                    
+                    # Add to our list of created objects
+                    $createdSpecialObjects += @{
+                        DN = $objectDN
+                        Name = $objectName
+                        Type = $objectType
+                    }
+                } catch {
+                    Write-Host "[!] Failed to create $objectType placeholder: $($_.Exception.Message)" -ForegroundColor Red
+                }
+            }
+        }
+        
+        # Wait for AD to fully propagate all created objects
+        Write-Host "[i] Waiting for AD to fully propagate objects..." -ForegroundColor Cyan
+        Start-Sleep -Seconds 5
+        
+        # Now add all objects to the group in a separate loop
+        foreach ($specialObject in $createdSpecialObjects) {
+            $objectDN = $specialObject.DN
+            $objectName = $specialObject.Name
+            $objectType = $specialObject.Type
+            
+            # Make sure the object exists before trying to add it to the group
+            $objectConfirmed = $false
+            try {
+                $confirmedObject = Get-ADObject -Identity $objectDN -ErrorAction Stop
+                $objectConfirmed = $true
+                Write-Host "[+] Confirmed object exists: $objectDN" -ForegroundColor Green
+            } catch {
+                Write-Host "[!] Could not confirm object exists: $objectDN" -ForegroundColor Red
+                $objectConfirmed = $false
+            }
+            
+            if ($objectConfirmed) {
+                # Add to group
+                try {
+                    Add-ADGroupMember -Identity $CanaryGroup.distinguishedName -Members $objectDN -ErrorAction Stop
+                    Write-Host "[+] Added $objectType to group" -ForegroundColor Green
+                } catch {
+                    Write-Host "[!] Could not add $objectType to group: $($_.Exception.Message)" -ForegroundColor Yellow
+                }
+                
+                # Record in output file
+                try {
+                    $createdObject = Get-ADObject -Identity $objectDN -Properties * -ErrorAction Stop
+                    $name = $createdObject.Name
+                    $guid = $createdObject.ObjectGUID
+                    Add-Content -Path $Output "N/A,$guid,$name"
+                    
+                    # Apply audit SACL (but don't apply deny permissions yet)
+                    SetAuditSACL -DistinguishedName $objectDN
+                } catch {
+                    Write-Host "[!] Could not get $objectType properties: $($_.Exception.Message)" -ForegroundColor Yellow
+                }
+            }
+        }
+        
+        # Now apply DenyAll permissions to the container and all objects inside it
+        try {
+            Write-Host "[i] Applying permissions to special objects container" -ForegroundColor Cyan
+            DenyAllOnCanariesAndChangeOwner -DistinguishedName $containerDN -Owner $Owner
+            Write-Host "[+] Applied permissions to special objects container" -ForegroundColor Green
+        } catch {
+            Write-Host "[!] Failed to apply permissions to special objects container: $($_.Exception.Message)" -ForegroundColor Red
+        }
+    }
+}
+
 function DeployCanaries {
     param($Config, $Output)
     ValidateAction
@@ -397,95 +545,6 @@ function DeployCanaries {
     } catch {
         Write-Host "[!] Could not retrieve Canary Group: $($_.Exception.Message)" -ForegroundColor Red
         exit $false
-    }
-
-    # Create a new function to handle all special object types at once
-    function CreateSpecialCanaries {
-        param($SpecialCanaries, $Output, $CanaryGroup, $Owner, $CanaryOU)
-        
-        # Create a dedicated container for special objects
-        $containerName = "PKI-Canaries"
-        
-        # Use the Canary OU path instead
-        $containerPath = "OU=" + $CanaryOU.Name + "," + $CanaryOU.Path
-        Write-Host "[i] Using container path: $containerPath" -ForegroundColor Cyan
-        
-        $containerDN = "CN=$containerName,$containerPath"
-        
-        # Check if container exists
-        $containerExists = $false
-        try {
-            Get-ADObject -Identity $containerDN -ErrorAction Stop
-            $containerExists = $true
-            Write-Host "[+] Special objects container already exists: $containerDN" -ForegroundColor Green
-        } catch {
-            # Create the container
-            try {
-                New-ADObject -Name $containerName -Type "container" -Path $containerPath -Description "Container for special canary objects"
-                Write-Host "[+] Created special objects container: $containerDN" -ForegroundColor Green
-                $containerExists = $true
-                Start-Sleep -Seconds 2  # Wait for container to be available
-            } catch {
-                Write-Host "[!] Failed to create special objects container: $($_.Exception.Message)" -ForegroundColor Red
-                $containerExists = $false
-            }
-        }
-        
-        # Only proceed if container exists
-        if ($containerExists) {
-            # Get all special canaries - PKI templates, domain policies, and other non-standard types
-            $specialTypes = @('pKICertificateTemplate', 'domainPolicy')
-            $specialObjects = $SpecialCanaries | Where-Object { $specialTypes -contains $_.Type }
-            
-            foreach ($specialObject in $specialObjects) {
-                $objectName = $specialObject.Name
-                $objectType = $specialObject.Type
-                $objectDN = "CN=$objectName,$containerDN"
-                
-                Write-Host "[i] Creating special object: $objectName (type: $objectType)" -ForegroundColor Cyan
-                
-                try {
-                    # Create the placeholder container
-                    New-ADObject -Name $objectName -Type "container" -Path $containerDN -Description "$($specialObject.Description) (placeholder for $objectType)"
-                    Write-Host "[+] Created placeholder for $objectType : $objectDN" -ForegroundColor Green
-                    
-                    # Wait for object to be available
-                    Start-Sleep -Seconds 2
-                    
-                    # Add to group
-                    try {
-                        Add-ADGroupMember -Identity $CanaryGroup.distinguishedName -Members $objectDN -ErrorAction Stop
-                        Write-Host "[+] Added $objectType to group" -ForegroundColor Green
-                    } catch {
-                        Write-Host "[!] Could not add $objectType to group: $($_.Exception.Message)" -ForegroundColor Yellow
-                    }
-                    
-                    # Get object properties for output
-                    try {
-                        $createdObject = Get-ADObject -Identity $objectDN -Properties * -ErrorAction Stop
-                        $name = $createdObject.Name
-                        $guid = $createdObject.ObjectGUID
-                        Add-Content -Path $Output "N/A,$guid,$name"
-                        
-                        # Apply audit SACL
-                        SetAuditSACL -DistinguishedName $objectDN
-                    } catch {
-                        Write-Host "[!] Could not get $objectType properties: $($_.Exception.Message)" -ForegroundColor Yellow
-                    }
-                } catch {
-                    Write-Host "[!] Failed to create $objectType placeholder: $($_.Exception.Message)" -ForegroundColor Red
-                }
-            }
-            
-            # Now apply DenyAll permissions to the container and all objects inside it
-            try {
-                Write-Host "[i] Applying permissions to special objects container" -ForegroundColor Cyan
-                DenyAllOnCanariesAndChangeOwner -DistinguishedName $containerDN -Owner $Owner
-                Write-Host "[+] Applied permissions to special objects container" -ForegroundColor Green
-            } catch {
-                Write-Host "[!] Failed to apply permissions to special objects container: $($_.Exception.Message)" -ForegroundColor Red
-            }
-        }
     }
 
     # First create all standard canaries (users, computers, groups, OUs)
