@@ -359,40 +359,98 @@ function CreateSpecialCanaries {
             
             if (-not $templateExists) {
                 try {
-                    # Create a pKICertificateTemplate object with required attributes
+                    # Check if the pKICertificateTemplate schema class exists
+                    $schemaExists = $false
+                    try {
+                        $schemaNC = (Get-ADRootDSE).schemaNamingContext
+                        $pKITemplateSchema = Get-ADObject -Identity "CN=PKI-Certificate-Template,$schemaNC" -ErrorAction SilentlyContinue
+                        $schemaExists = ($pKITemplateSchema -ne $null)
+                        
+                        if ($schemaExists) {
+                            Write-Host "[+] PKI schema extensions are available" -ForegroundColor Green
+                        } else {
+                            Write-Host "[!] PKI schema extensions not found. This is required for certificate templates." -ForegroundColor Yellow
+                        }
+                    } catch {
+                        Write-Host "[!] Error checking PKI schema: $($_.Exception.Message)" -ForegroundColor Yellow
+                    }
                     
-                    # First create the base object
-                    New-ADObject -Name $templateName -Type "pKICertificateTemplate" -Path $containerDN -OtherAttributes @{
+                    # Create a pKICertificateTemplate object with required attributes
+                    $templateAttributes = @{
                         'displayName' = $templateName
                         'msPKI-Certificate-Name-Flag' = 1
                         'msPKI-Enrollment-Flag' = 0
                         'msPKI-Private-Key-Flag' = 16
-                        'msPKI-Certificate-Application-Policy' = @('1.3.6.1.5.5.7.3.2', '1.3.6.1.5.5.7.3.1')
-                        'msPKI-Template-Schema-Version' = 1
-                        'revision' = 100
                         'pKIMaxIssuingDepth' = 0
                         'pKIDefaultKeySpec' = 1
-                        'pKIKeyUsage' = @(0, 128)
-                        'pKIExpirationPeriod' = [byte[]](0x00, 0x40, 0x39, 0x87, 0x2E, 0xE1, 0xFE, 0xFF)
-                        'pKIOverlapPeriod' = [byte[]](0x00, 0x80, 0xA6, 0x0A, 0xFF, 0xDE, 0xFF, 0xFF)
                     }
                     
-                    Write-Host "[+] Created PKI certificate template: $templateDN" -ForegroundColor Green
-                    $createdObjectDNs += $templateDN  # Add to our tracking list
-                    Start-Sleep -Seconds 2  # Brief delay
-                } catch {
-                    Write-Host "[!] Failed to create PKI certificate template: $($_.Exception.Message)" -ForegroundColor Red
-                    
-                    # Fall back to creating a container placeholder
+                    # Try to add these attributes, but they may not be available in all schemas
                     try {
-                        Write-Host "[i] Creating placeholder container instead" -ForegroundColor Yellow
-                        New-ADObject -Name $templateName -Type "container" -Path $containerDN -Description "Placeholder for PKI certificate template: $templateName"
-                        Write-Host "[+] Created placeholder for PKI certificate template: $templateDN" -ForegroundColor Green
-                        $createdObjectDNs += $templateDN  # Add to our tracking list
+                        $templateAttributes['msPKI-Certificate-Application-Policy'] = @('1.3.6.1.5.5.7.3.2', '1.3.6.1.5.5.7.3.1')
                     } catch {
-                        Write-Host "[!] Failed to create placeholder: $($_.Exception.Message)" -ForegroundColor Red
-                        continue  # Skip to the next object
+                        Write-Host "[i] Could not set msPKI-Certificate-Application-Policy attribute" -ForegroundColor Yellow
                     }
+                    
+                    try {
+                        $templateAttributes['msPKI-Template-Schema-Version'] = 1
+                    } catch {
+                        Write-Host "[i] Could not set msPKI-Template-Schema-Version attribute" -ForegroundColor Yellow
+                    }
+                    
+                    try {
+                        $templateAttributes['revision'] = 100
+                    } catch {
+                        Write-Host "[i] Could not set revision attribute" -ForegroundColor Yellow
+                    }
+                    
+                    try {
+                        $templateAttributes['pKIKeyUsage'] = @(0, 128)
+                    } catch {
+                        Write-Host "[i] Could not set pKIKeyUsage attribute" -ForegroundColor Yellow
+                    }
+                    
+                    try {
+                        $templateAttributes['pKIExpirationPeriod'] = [byte[]](0x00, 0x40, 0x39, 0x87, 0x2E, 0xE1, 0xFE, 0xFF)
+                    } catch {
+                        Write-Host "[i] Could not set pKIExpirationPeriod attribute" -ForegroundColor Yellow
+                    }
+                    
+                    try {
+                        $templateAttributes['pKIOverlapPeriod'] = [byte[]](0x00, 0x80, 0xA6, 0x0A, 0xFF, 0xDE, 0xFF, 0xFF)
+                    } catch {
+                        Write-Host "[i] Could not set pKIOverlapPeriod attribute" -ForegroundColor Yellow
+                    }
+                    
+                    # Create the template object with detailed error handling
+                    try {
+                        Write-Host "[i] Attempting to create certificate template with attributes:" -ForegroundColor Cyan
+                        $templateAttributes.Keys | ForEach-Object {
+                            Write-Host "   - $_ = $($templateAttributes[$_])" -ForegroundColor Gray
+                        }
+                        
+                        New-ADObject -Name $templateName -Type "pKICertificateTemplate" -Path $containerDN -OtherAttributes $templateAttributes
+                        Write-Host "[+] Created PKI certificate template: $templateDN" -ForegroundColor Green
+                        $createdObjectDNs += $templateDN  # Add to our tracking list
+                        Start-Sleep -Seconds 2  # Brief delay
+                    } catch {
+                        $errorMsg = $_.Exception.Message
+                        $errorDetails = if($_.Exception.InnerException) { $_.Exception.InnerException.Message } else { "No additional details" }
+                        
+                        Write-Host "[!] Failed to create PKI certificate template" -ForegroundColor Red
+                        Write-Host "    Error: $errorMsg" -ForegroundColor Red
+                        Write-Host "    Details: $errorDetails" -ForegroundColor Red
+                        Write-Host "    This may indicate the AD schema does not support PKI certificate templates." -ForegroundColor Red
+                        Write-Host "    Please ensure the AD Certificate Services schema extensions are installed." -ForegroundColor Red
+                        
+                        # Do not create placeholders - skip this object
+                        Write-Host "[i] Skipping this certificate template - no placeholder will be created" -ForegroundColor Yellow
+                        continue
+                    }
+                } catch {
+                    Write-Host "[!] Error in certificate template creation process: $($_.Exception.Message)" -ForegroundColor Red
+                    Write-Host "[i] Skipping this certificate template - no placeholder will be created" -ForegroundColor Yellow
+                    continue  # Skip to the next object
                 }
             }
             
@@ -409,7 +467,7 @@ function CreateSpecialCanaries {
                 Add-ADGroupMember -Identity $CanaryGroup.distinguishedName -Members $templateDN -ErrorAction Stop
                 Write-Host "[+] Added PKI template to group" -ForegroundColor Green
             } catch {
-                Write-Host "[!] Could not add PKI template to group: $($_.Exception.Message)" -ForegroundColor Red
+                Write-Host "[!] Could not add PKI template to group: $($_.Exception.Message)" -ForegroundColor Yellow
                 # Try alternative method if the first fails
                 try {
                     Write-Host "[i] Trying alternative method to add to group..." -ForegroundColor Cyan
@@ -453,31 +511,42 @@ function CreateSpecialCanaries {
             
             if (-not $policyExists) {
                 try {
-                    # Create a groupPolicyContainer object
-                    New-ADObject -Name $policyName -Type "groupPolicyContainer" -Path $containerDN -OtherAttributes @{
+                    # Create a groupPolicyContainer object with detailed error handling
+                    $policyGuid = [Guid]::NewGuid().ToString()
+                    $policyAttributes = @{
                         'displayName' = $policyName
                         'gPCFunctionalityVersion' = 2
                         'flags' = 0
                         'versionNumber' = 1
-                        'gPCFileSysPath' = "\\$env:USERDNSDOMAIN\sysvol\$env:USERDNSDOMAIN\Policies\{$([Guid]::NewGuid().ToString())}"
+                        'gPCFileSysPath' = "\\$env:USERDNSDOMAIN\sysvol\$env:USERDNSDOMAIN\Policies\{$policyGuid}"
                     }
                     
-                    Write-Host "[+] Created domain policy: $policyDN" -ForegroundColor Green
-                    $createdObjectDNs += $policyDN  # Add to our tracking list
-                    Start-Sleep -Seconds 2  # Brief delay
-                } catch {
-                    Write-Host "[!] Failed to create domain policy: $($_.Exception.Message)" -ForegroundColor Red
+                    Write-Host "[i] Attempting to create group policy container with attributes:" -ForegroundColor Cyan
+                    $policyAttributes.Keys | ForEach-Object {
+                        Write-Host "   - $_ = $($policyAttributes[$_])" -ForegroundColor Gray
+                    }
                     
-                    # Fall back to creating a container placeholder
                     try {
-                        Write-Host "[i] Creating placeholder container instead" -ForegroundColor Yellow
-                        New-ADObject -Name $policyName -Type "container" -Path $containerDN -Description "Placeholder for domain policy: $policyName"
-                        Write-Host "[+] Created placeholder for domain policy: $policyDN" -ForegroundColor Green
+                        New-ADObject -Name $policyName -Type "groupPolicyContainer" -Path $containerDN -OtherAttributes $policyAttributes
+                        Write-Host "[+] Created domain policy: $policyDN" -ForegroundColor Green
                         $createdObjectDNs += $policyDN  # Add to our tracking list
+                        Start-Sleep -Seconds 2  # Brief delay
                     } catch {
-                        Write-Host "[!] Failed to create placeholder: $($_.Exception.Message)" -ForegroundColor Red
-                        continue  # Skip to the next object
+                        $errorMsg = $_.Exception.Message
+                        $errorDetails = if($_.Exception.InnerException) { $_.Exception.InnerException.Message } else { "No additional details" }
+                        
+                        Write-Host "[!] Failed to create domain policy" -ForegroundColor Red
+                        Write-Host "    Error: $errorMsg" -ForegroundColor Red
+                        Write-Host "    Details: $errorDetails" -ForegroundColor Red
+                        
+                        # Do not create placeholders - skip this object
+                        Write-Host "[i] Skipping this domain policy - no placeholder will be created" -ForegroundColor Yellow
+                        continue
                     }
+                } catch {
+                    Write-Host "[!] Error in domain policy creation process: $($_.Exception.Message)" -ForegroundColor Red
+                    Write-Host "[i] Skipping this domain policy - no placeholder will be created" -ForegroundColor Yellow
+                    continue  # Skip to the next object
                 }
             }
             
@@ -494,7 +563,7 @@ function CreateSpecialCanaries {
                 Add-ADGroupMember -Identity $CanaryGroup.distinguishedName -Members $policyDN -ErrorAction Stop
                 Write-Host "[+] Added domain policy to group" -ForegroundColor Green
             } catch {
-                Write-Host "[!] Could not add domain policy to group: $($_.Exception.Message)" -ForegroundColor Red
+                Write-Host "[!] Could not add domain policy to group: $($_.Exception.Message)" -ForegroundColor Yellow
                 # Try alternative method if the first fails
                 try {
                     Write-Host "[i] Trying alternative method to add to group..." -ForegroundColor Cyan
@@ -529,7 +598,7 @@ function CreateSpecialCanaries {
                 DenyAllOnCanariesAndChangeOwner -DistinguishedName $objectDN -Owner $Owner
                 Write-Host "[+] Applied restrictive permissions to: $objectDN" -ForegroundColor Green
             } catch {
-                Write-Host "[!] Failed to apply restrictive permissions to ${objectDN}: $($_.Exception.Message)" -ForegroundColor Red
+                Write-Host "[!] Failed to apply restrictive permissions to $objectDN : $($_.Exception.Message)" -ForegroundColor Red
             }
         }
         
