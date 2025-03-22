@@ -81,7 +81,6 @@ function CreateCanary {
     
     # Track whether creation was successful
     $creationSuccessful = $false
-    $createdObjectDN = $DistinguishedName  # Track actual DN of created object
 
     # Log creation attempt
     Write-Host "Attempting to create canary: $($Canary.Name) of type $($Canary.Type) at $DistinguishedName"
@@ -93,7 +92,6 @@ function CreateCanary {
         Write-Host "[-] Canary object already existed : $DistinguishedName" -ForegroundColor Yellow
         $objectExists = $true
         $creationSuccessful = $true
-        $createdObjectDN = $DistinguishedName
     } catch {
         $objectExists = $false
     }
@@ -106,43 +104,76 @@ function CreateCanary {
                     New-ADUser -Name $Canary.Name -Path $Canary.Path -Description $Canary.Description -Enabled $false
                     $creationSuccessful = $true
                     
-                    # Add user to group and set primary group
-                    Add-ADGroupMember -Identity $CanaryGroupDN -Members $DistinguishedName -ErrorAction SilentlyContinue
-                    Set-ADObject $DistinguishedName -replace @{primaryGroupID=$CanaryGroupToken} -ErrorAction SilentlyContinue
+                    # IMPORTANT: Add user to group FIRST
+                    try {
+                        Add-ADGroupMember -Identity $CanaryGroupDN -Members $DistinguishedName -ErrorAction Stop
+                        Write-Host "[+] Added user to canary group" -ForegroundColor Green
+                    } catch {
+                        Write-Host "[!] Could not add user to group: $($_.Exception.Message)" -ForegroundColor Yellow
+                    }
+                    
+                    # Set primary group
+                    try {
+                        Set-ADObject $DistinguishedName -replace @{primaryGroupID=$CanaryGroupToken} -ErrorAction Stop
+                        Write-Host "[+] Set primary group token" -ForegroundColor Green
+                    } catch {
+                        Write-Host "[!] Could not set primary group: $($_.Exception.Message)" -ForegroundColor Yellow
+                    }
                     
                     # Clean up other group memberships
-                    $userObj = Get-ADUser -Identity $DistinguishedName -Properties MemberOf -ErrorAction SilentlyContinue
-                    if ($userObj -ne $null) {
+                    try {
+                        $userObj = Get-ADUser -Identity $DistinguishedName -Properties MemberOf -ErrorAction Stop
                         foreach($G in $userObj.MemberOf){
                             if ($G -ne $CanaryGroupDN) {
                                 Remove-ADGroupMember -Identity $G -Members $DistinguishedName -Confirm:$false -ErrorAction SilentlyContinue
                             }
                         }
+                    } catch {
+                        Write-Host "[!] Could not clean up other group memberships: $($_.Exception.Message)" -ForegroundColor Yellow
                     }
                 }
                 "group" {
                     New-ADGroup -Name $Canary.Name -GroupCategory Security -GroupScope Global -Path $Canary.Path -Description $Canary.Description
                     $creationSuccessful = $true
                     
-                    # Add group to canary group
-                    Add-ADGroupMember -Identity $CanaryGroupDN -Members $DistinguishedName -ErrorAction SilentlyContinue
+                    # IMPORTANT: Add group to canary group FIRST
+                    try {
+                        Add-ADGroupMember -Identity $CanaryGroupDN -Members $DistinguishedName -ErrorAction Stop
+                        Write-Host "[+] Added group to canary group" -ForegroundColor Green
+                    } catch {
+                        Write-Host "[!] Could not add group to canary group: $($_.Exception.Message)" -ForegroundColor Yellow
+                    }
                 }
                 "computer" {
                     New-ADComputer -Name $Canary.Name -Path $Canary.Path -Description $Canary.Description -Enabled $false
                     $creationSuccessful = $true
                     
-                    # Add computer to group and set primary group
-                    Add-ADGroupMember -Identity $CanaryGroupDN -Members $DistinguishedName -ErrorAction SilentlyContinue
-                    Set-ADObject $DistinguishedName -replace @{primaryGroupID=$CanaryGroupToken} -ErrorAction SilentlyContinue
+                    # IMPORTANT: Add computer to group FIRST
+                    try {
+                        Add-ADGroupMember -Identity $CanaryGroupDN -Members $DistinguishedName -ErrorAction Stop
+                        Write-Host "[+] Added computer to canary group" -ForegroundColor Green
+                    } catch {
+                        Write-Host "[!] Could not add computer to group: $($_.Exception.Message)" -ForegroundColor Yellow
+                    }
+                    
+                    # Set primary group
+                    try {
+                        Set-ADObject $DistinguishedName -replace @{primaryGroupID=$CanaryGroupToken} -ErrorAction Stop
+                        Write-Host "[+] Set primary group token" -ForegroundColor Green
+                    } catch {
+                        Write-Host "[!] Could not set primary group: $($_.Exception.Message)" -ForegroundColor Yellow
+                    }
                     
                     # Clean up other group memberships
-                    $computerObj = Get-ADComputer -Identity $DistinguishedName -Properties MemberOf -ErrorAction SilentlyContinue
-                    if ($computerObj -ne $null) {
+                    try {
+                        $computerObj = Get-ADComputer -Identity $DistinguishedName -Properties MemberOf -ErrorAction Stop
                         foreach($G in $computerObj.MemberOf){
                             if ($G -ne $CanaryGroupDN) {
                                 Remove-ADGroupMember -Identity $G -Members $DistinguishedName -Confirm:$false -ErrorAction SilentlyContinue
                             }
                         }
+                    } catch {
+                        Write-Host "[!] Could not clean up other group memberships: $($_.Exception.Message)" -ForegroundColor Yellow
                     }
                 }
                 "organizationalUnit" {
@@ -151,13 +182,14 @@ function CreateCanary {
                     # Note: OUs cannot be members of groups, so we skip group operations
                 }
                 "pKICertificateTemplate" {
-                    # For PKI template, always create a container placeholder
-                    Write-Host "[i] Creating container placeholder for PKI Certificate Template" -ForegroundColor Cyan
+                    # Create a placeholder object for PKI Certificate Template
+                    Write-Host "[i] Creating placeholder for PKI Certificate Template" -ForegroundColor Cyan
                     New-ADObject -Name $Canary.Name -Path $Canary.Path -Type "container" -Description "$($Canary.Description) (placeholder for pKICertificateTemplate)"
                     $creationSuccessful = $true
                     
-                    # Try to add to the group but don't fail if it doesn't work
+                    # IMPORTANT: Add to the group FIRST, before applying restrictive permissions
                     try {
+                        Start-Sleep -Seconds 2  # Brief delay to ensure object is available
                         Add-ADGroupMember -Identity $CanaryGroupDN -Members $DistinguishedName -ErrorAction Stop
                         Write-Host "[+] Added PKI template placeholder to group" -ForegroundColor Green
                     } catch {
@@ -165,13 +197,14 @@ function CreateCanary {
                     }
                 }
                 "domainPolicy" {
-                    # Always create a container placeholder for domain policy
-                    Write-Host "[i] Creating container placeholder for domain policy" -ForegroundColor Cyan
+                    # Create a placeholder for domain policy
+                    Write-Host "[i] Creating placeholder for domain policy" -ForegroundColor Cyan
                     New-ADObject -Name $Canary.Name -Path $Canary.Path -Type "container" -Description "$($Canary.Description) (placeholder for domainPolicy)"
                     $creationSuccessful = $true
                     
-                    # Try to add to the group but don't fail if it doesn't work
+                    # IMPORTANT: Add to the group FIRST, before applying restrictive permissions
                     try {
+                        Start-Sleep -Seconds 2  # Brief delay to ensure object is available
                         Add-ADGroupMember -Identity $CanaryGroupDN -Members $DistinguishedName -ErrorAction Stop
                         Write-Host "[+] Added policy placeholder to group" -ForegroundColor Green
                     } catch {
@@ -179,40 +212,26 @@ function CreateCanary {
                     }
                 }
                 default {
-                    # For all other types, try creating the object directly first, then fall back to a container
-                    Write-Host "[i] Creating object of type: $($Canary.Type)" -ForegroundColor Cyan
+                    # Generic handling for other types
+                    Write-Host "[i] Creating placeholder for type: $($Canary.Type)" -ForegroundColor Cyan
                     
                     try {
-                        New-ADObject -Name $Canary.Name -Path $Canary.Path -Type $Canary.Type -Description $Canary.Description
-                        Write-Host "[+] Created $($Canary.Type) object: $DistinguishedName" -ForegroundColor Green
+                        # Always create a container placeholder for unknown types
+                        New-ADObject -Name $Canary.Name -Path $Canary.Path -Type "container" -Description "$($Canary.Description) (placeholder for $($Canary.Type))"
+                        Write-Host "[+] Created placeholder container" -ForegroundColor Green
                         $creationSuccessful = $true
                         
-                        # Try to add to the group but don't fail if it doesn't work
+                        # IMPORTANT: Add to the group FIRST, before applying restrictive permissions
                         try {
+                            Start-Sleep -Seconds 2  # Brief delay to ensure object is available
                             Add-ADGroupMember -Identity $CanaryGroupDN -Members $DistinguishedName -ErrorAction Stop
-                            Write-Host "[+] Added to group" -ForegroundColor Green
+                            Write-Host "[+] Added placeholder to group" -ForegroundColor Green
                         } catch {
-                            Write-Host "[!] Could not add to group: $($_.Exception.Message)" -ForegroundColor Yellow
+                            Write-Host "[!] Could not add placeholder to group: $($_.Exception.Message)" -ForegroundColor Yellow
                         }
                     } catch {
-                        Write-Host "[!] Could not create $($Canary.Type) object: $($_.Exception.Message)" -ForegroundColor Red
-                        
-                        # Fall back to creating a container
-                        try {
-                            New-ADObject -Name $Canary.Name -Path $Canary.Path -Type "container" -Description "$($Canary.Description) (placeholder for $($Canary.Type))"
-                            Write-Host "[+] Created placeholder container instead" -ForegroundColor Green
-                            $creationSuccessful = $true
-                            
-                            # Try to add the placeholder to the group but don't fail if it doesn't work
-                            try {
-                                Add-ADGroupMember -Identity $CanaryGroupDN -Members $DistinguishedName -ErrorAction Stop
-                                Write-Host "[+] Added placeholder to group" -ForegroundColor Green
-                            } catch {
-                                Write-Host "[!] Could not add placeholder to group: $($_.Exception.Message)" -ForegroundColor Yellow
-                            }
-                        } catch {
-                            Write-Host "[!] Failed to create placeholder as well: $($_.Exception.Message)" -ForegroundColor Red
-                        }
+                        Write-Host "[!] Failed to create placeholder: $($_.Exception.Message)" -ForegroundColor Red
+                        $creationSuccessful = $false
                     }
                 }
             }
@@ -222,13 +241,18 @@ function CreateCanary {
                 # Get the created object - verify it exists first
                 $CanaryObject = $null
                 try {
-                    $CanaryObject = Get-ADObject -Identity $createdObjectDN -Properties * -ErrorAction Stop
-                    Write-Host "[+] Successfully retrieved created object: $createdObjectDN" -ForegroundColor Green
+                    $CanaryObject = Get-ADObject -Identity $DistinguishedName -Properties * -ErrorAction Stop
+                    Write-Host "[+] Successfully retrieved created object: $DistinguishedName" -ForegroundColor Green
                     
-                    # Set audit and permissions
-                    SetAuditSACL -DistinguishedName $createdObjectDN
-                    Set-ADObject -Identity $createdObjectDN -ProtectedFromAccidentalDeletion $False
-                    DenyAllOnCanariesAndChangeOwner -DistinguishedName $createdObjectDN -Owner $Owner
+                    # IMPORTANT: Apply security settings ONLY AFTER adding to groups
+                    # First apply SACL for auditing
+                    SetAuditSACL -DistinguishedName $DistinguishedName
+                    
+                    # Then disable protection from accidental deletion
+                    Set-ADObject -Identity $DistinguishedName -ProtectedFromAccidentalDeletion $False
+                    
+                    # Finally apply deny all DACL - this will likely block further modifications
+                    DenyAllOnCanariesAndChangeOwner -DistinguishedName $DistinguishedName -Owner $Owner
                     
                     # Record the created object
                     $SamAccountName = $CanaryObject.SamAccountName
@@ -237,11 +261,11 @@ function CreateCanary {
                     $Guid = $CanaryObject.ObjectGUID
                     Add-Content -Path $Output "$SamAccountName,$Guid,$Name"
                     
-                    Write-Host "[*] Canary successfully created and configured: $createdObjectDN" -ForegroundColor Green
+                    Write-Host "[*] Canary successfully created and configured: $DistinguishedName" -ForegroundColor Green
                 } catch {
                     Write-Host "[!] Error retrieving or configuring created object: $($_.Exception.Message)" -ForegroundColor Red
                     
-                    # Try one more time with a direct Get-ADObject approach
+                    # Try to find the object by name if we can't find it by DN
                     try {
                         $filter = "name -eq '$($Canary.Name)'"
                         $searchBase = $Canary.Path
@@ -250,7 +274,7 @@ function CreateCanary {
                         if ($possibleObject -ne $null) {
                             Write-Host "[+] Found object by searching: $($possibleObject.DistinguishedName)" -ForegroundColor Green
                             
-                            # Set audit and permissions
+                            # Apply security settings
                             SetAuditSACL -DistinguishedName $possibleObject.DistinguishedName
                             Set-ADObject -Identity $possibleObject.DistinguishedName -ProtectedFromAccidentalDeletion $False
                             DenyAllOnCanariesAndChangeOwner -DistinguishedName $possibleObject.DistinguishedName -Owner $Owner
