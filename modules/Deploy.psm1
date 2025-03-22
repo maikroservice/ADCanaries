@@ -401,11 +401,15 @@ function DeployCanaries {
 
     # Create a new function to handle all special object types at once
     function CreateSpecialCanaries {
-        param($SpecialCanaries, $Output, $CanaryGroup, $Owner)
+        param($SpecialCanaries, $Output, $CanaryGroup, $Owner, $CanaryOU)
         
         # Create a dedicated container for special objects
         $containerName = "PKI-Canaries"
-        $containerPath = $CanaryGroup.Path
+        
+        # Use the Canary OU path instead
+        $containerPath = "OU=" + $CanaryOU.Name + "," + $CanaryOU.Path
+        Write-Host "[i] Using container path: $containerPath" -ForegroundColor Cyan
+        
         $containerDN = "CN=$containerName,$containerPath"
         
         # Check if container exists
@@ -491,7 +495,7 @@ function DeployCanaries {
     }
     
     # Then create all special objects in a separate container
-    CreateSpecialCanaries -SpecialCanaries $Canaries -Output $Output -CanaryGroup $CanaryGroup -Owner $CanaryOwner
+    CreateSpecialCanaries -SpecialCanaries $Canaries -Output $Output -CanaryGroup $CanaryGroup -Owner $CanaryOwner -CanaryOU $CanaryOU
 
     # Deny all canary OU no audit (do this last)
     $DN = "OU="+$CanaryOU.Name+","+$CanaryOU.Path
