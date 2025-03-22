@@ -113,9 +113,6 @@ function DeployCanaries {
     $CanaryOU = $Configuration.CanaryOU
     $Canaries = $ADCanariesJson.Canaries
     
-    # DIAGNOSTIC: Print loaded values
-    Write-Host "DIAGNOSTIC: Loaded CanaryOU Type = $($CanaryOU.Type)"
-    
     # Overwrite output file
     Remove-Item -Path $Output -ErrorAction SilentlyContinue
     Add-Content -Path $Output "CanarySamName,CanaryGUID,CanaryName"
@@ -127,14 +124,13 @@ function DeployCanaries {
         exit $false
     }
 
-    # Create OU for Canaries - FORCED to use organizationalUnit
+    # Create OU for Canaries - using New-ADOrganizationalUnit explicitly
     $DistinguishedName = "OU="+$CanaryOU.Name+","+$CanaryOU.Path
     if (ADObjectExists -Path $DistinguishedName){
         Write-Host "[-] Canary OU already existed : $DistinguishedName"
     }
     else {
-        # HARDCODING to use New-ADOrganizationalUnit directly, ignoring the type from config
-        Write-Host "DIAGNOSTIC: Creating OU with New-ADOrganizationalUnit cmdlet"
+        # Use New-ADOrganizationalUnit directly
         New-ADOrganizationalUnit -Name $CanaryOU.Name -Path $CanaryOU.Path -Description $CanaryOU.Description
         
         # Configure the OU
@@ -143,10 +139,6 @@ function DeployCanaries {
         $ACL.SetAccessRuleProtection($true, $false)
         $ACL | Set-Acl -Path "AD:/$DistinguishedName"
         Write-Host "[*] Canary OU created and inheritance disabled : $DistinguishedName"
-        
-        # DIAGNOSTIC: Get the created object and check its type
-        $createdOU = Get-ADObject -Identity $DistinguishedName -Properties objectClass
-        Write-Host "DIAGNOSTIC: Created OU objectClass = $($createdOU.objectClass)"
     }
 
     # Create Primary Group for Canaries
