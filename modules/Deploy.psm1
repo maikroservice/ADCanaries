@@ -614,41 +614,145 @@ function CreateSpecialCanaries {
             
             if (-not $policyExists) {
                 try {
-                    # Create a groupPolicyContainer object with detailed error handling
+                    # Check if the groupPolicyContainer schema class exists
+                    $schemaExists = $false
+                    try {
+                        $schemaNC = (Get-ADRootDSE).schemaNamingContext
+                        $gpcSchema = Get-ADObject -Filter "name -eq 'Group-Policy-Container'" -SearchBase $schemaNC -ErrorAction SilentlyContinue
+                        $schemaExists = ($gpcSchema -ne $null)
+                        
+                        if ($schemaExists) {
+                            Write-Host "[+] Group Policy Container schema extensions are available" -ForegroundColor Green
+                        } else {
+                            Write-Host "[!] Group Policy Container schema extensions not found. This is required for Group Policy objects." -ForegroundColor Yellow
+                        }
+                    } catch {
+                        Write-Host "[!] Error checking Group Policy Container schema: $($_.Exception.Message)" -ForegroundColor Yellow
+                    }
+                    
+                    # Create a unique policy GUID
                     $policyGuid = [Guid]::NewGuid().ToString()
+                    
+                    # Analyze the schema to determine which attributes are single/multi-valued
+                    Write-Host "[i] Analyzing schema for Group Policy Container attribute definitions..." -ForegroundColor Cyan
+                    $attributeDefinitions = @{}
+                    
+                    function Get-AttributeValuesType {
+                        param($AttributeName)
+                        
+                        try {
+                            $attributeSchema = Get-ADObject -Filter "lDAPDisplayName -eq '$AttributeName'" -SearchBase $schemaNC -Properties isSingleValued
+                            return @{
+                                Name = $AttributeName
+                                IsSingleValued = $attributeSchema.isSingleValued
+                            }
+                        } catch {
+                            # If we can't find the attribute schema, assume it's single-valued to be safe
+                            Write-Host "[!] Could not find schema definition for attribute $AttributeName" -ForegroundColor Yellow
+                            return @{
+                                Name = $AttributeName
+                                IsSingleValued = $true
+                            }
+                        }
+                    }
+                    
+                    # Define core GPO attributes
                     $policyAttributes = @{
                         'displayName' = $policyName
-                        'gPCFunctionalityVersion' = 2
-                        'flags' = 0
-                        'versionNumber' = 1
-                        'gPCFileSysPath' = "\\$env:USERDNSDOMAIN\sysvol\$env:USERDNSDOMAIN\Policies\{$policyGuid}"
                     }
                     
-                    Write-Host "[i] Attempting to create group policy container with attributes:" -ForegroundColor Cyan
-                    $policyAttributes.Keys | ForEach-Object {
-                        Write-Host "   - $_ = $($policyAttributes[$_])" -ForegroundColor Gray
+                    # Add additional required attributes, checking each one for single/multi-valued status
+                    $attributesToCheck = @(
+                        @{ Name = 'gPCFunctionalityVersion'; Value = 2 },
+                        @{ Name = 'flags'; Value = 0 },
+                        @{ Name = 'versionNumber'; Value = 1 },
+                        @{ Name = 'gPCFileSysPath'; Value = "\\$env:USERDNSDOMAIN\sysvol\$env:USERDNSDOMAIN\Policies\{$policyGuid}" }
+                    )
+                    
+                    foreach ($attr in $attributesToCheck) {
+                        $attrDef = Get-AttributeValuesType -AttributeName $attr.Name
+                        $attributeDefinitions[$attr.Name] = $attrDef
+                        
+                        if ($attrDef.IsSingleValued) {
+                            Write-Host "[+] Adding single-valued attribute: $($attr.Name) = $($attr.Value)" -ForegroundColor Green
+                            $policyAttributes[$attr.Name] = $attr.Value
+                        } else {
+                            Write-Host "[+] Adding multi-valued attribute: $($attr.Name) = $($attr.Value)" -ForegroundColor Green
+                            $policyAttributes[$attr.Name] = @($attr.Value)
+                        }
                     }
                     
+                    # Log the attributes with their value types
+                    Write-Host "`n[i] Final attribute list to create Group Policy Container:" -ForegroundColor Cyan
+                    foreach ($key in $policyAttributes.Keys) {
+                        $value = $policyAttributes[$key]
+                        $valueType = if ($value -is [Array]) { "Array[$($value.Count)]" } else { $value.GetType().Name }
+                        $isSingleValued = if ($attributeDefinitions.ContainsKey($key)) { $attributeDefinitions[$key].IsSingleValued } else { "Unknown" }
+                        $singleValuedText = if ($isSingleValued -eq $true) { "SINGLE-VALUED" } elseif ($isSingleValued -eq $false) { "MULTI-VALUED" } else { "UNKNOWN" }
+                        
+                        Write-Host "   - $key = $value ($valueType) [$singleValuedText]" -ForegroundColor Gray
+                    }
+                    
+                    # Try to create the GPO with all attributes
                     try {
+                        Write-Host "`n[i] Creating Group Policy Container..." -ForegroundColor Cyan
                         New-ADObject -Name $policyName -Type "groupPolicyContainer" -Path $containerDN -OtherAttributes $policyAttributes
                         Write-Host "[+] Created domain policy: $policyDN" -ForegroundColor Green
                         $createdObjectDNs += $policyDN  # Add to our tracking list
-                        Start-Sleep -Seconds 2  # Brief delay
                     } catch {
                         $errorMsg = $_.Exception.Message
                         $errorDetails = if($_.Exception.InnerException) { $_.Exception.InnerException.Message } else { "No additional details" }
                         
-                        Write-Host "[!] Failed to create domain policy" -ForegroundColor Red
+                        Write-Host "[!] Failed to create Group Policy Container" -ForegroundColor Red
                         Write-Host "    Error: $errorMsg" -ForegroundColor Red
                         Write-Host "    Details: $errorDetails" -ForegroundColor Red
                         
-                        # Do not create placeholders - skip this object
-                        Write-Host "[i] Skipping this domain policy - no placeholder will be created" -ForegroundColor Yellow
+                        # Try diagnostic creation with minimal attributes
+                        if ($errorMsg -match "attribute that can have only one value" -or $errorMsg -match "class-schema") {
+                            Write-Host "`n[i] TROUBLESHOOTING GROUP POLICY CREATION:" -ForegroundColor Cyan
+                            
+                            # First try minimal attributes
+                            try {
+                                Write-Host "[i] Trying to create with minimal attributes (displayName only)..." -ForegroundColor Yellow
+                                New-ADObject -Name "${policyName}-minimal" -Type "groupPolicyContainer" -Path $containerDN -OtherAttributes @{ 'displayName' = $policyName }
+                                Write-Host "[+] Minimal GPO created! This confirms other attributes are problematic." -ForegroundColor Green
+                                $minimalDN = "CN=${policyName}-minimal,$containerDN"
+                                $createdObjectDNs += $minimalDN
+                            } catch {
+                                $gpoClassError = $_.Exception.Message
+                                
+                                if ($gpoClassError -match "no such object" -or $gpoClassError -match "class-schema") {
+                                    Write-Host "[!] GPO schema isn't available. Creating container placeholder instead." -ForegroundColor Yellow
+                                    
+                                    # Create a container placeholder with GPO-like attributes
+                                    try {
+                                        $placeholderName = "${policyName}-placeholder"
+                                        New-ADObject -Name $placeholderName -Type "container" -Path $containerDN -Description "Placeholder for domain policy: $policyName"
+                                        
+                                        # Add some GPO-like attributes to make it more realistic
+                                        $placeholderDN = "CN=$placeholderName,$containerDN"
+                                        Set-ADObject -Identity $placeholderDN -Add @{
+                                            'displayName' = $policyName
+                                            'description' = "Group Policy Canary (placeholder)"
+                                            'info' = "Original GPO creation failed: $gpoClassError"
+                                        }
+                                        
+                                        Write-Host "[+] Created GPO placeholder container: $placeholderDN" -ForegroundColor Green
+                                        $createdObjectDNs += $placeholderDN
+                                    } catch {
+                                        Write-Host "[!] Failed to create even a placeholder: $($_.Exception.Message)" -ForegroundColor Red
+                                    }
+                                } else {
+                                    Write-Host "[!] Minimal GPO creation also failed: $gpoClassError" -ForegroundColor Red
+                                }
+                            }
+                        }
+                        
+                        # Continue to the next policy if we couldn't create this one
                         continue
                     }
                 } catch {
                     Write-Host "[!] Error in domain policy creation process: $($_.Exception.Message)" -ForegroundColor Red
-                    Write-Host "[i] Skipping this domain policy - no placeholder will be created" -ForegroundColor Yellow
                     continue  # Skip to the next object
                 }
             }
