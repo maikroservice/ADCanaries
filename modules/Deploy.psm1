@@ -421,7 +421,7 @@ function CreateSpecialCanaries {
                 DenyAllOnCanariesAndChangeOwner -DistinguishedName $objectDN -Owner $Owner
                 Write-Host "[+] Applied restrictive permissions to: $objectDN" -ForegroundColor Green
             } catch {
-                Write-Host "[!] Failed to apply restrictive permissions to $objectDN: $($_.Exception.Message)" -ForegroundColor Red
+                Write-Host "[!] Failed to apply restrictive permissions to $objectDN : $($_.Exception.Message)" -ForegroundColor Red
             }
         }
         
