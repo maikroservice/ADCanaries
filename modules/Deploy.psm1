@@ -334,64 +334,87 @@ function CreateSpecialCanaries {
     
     # Only proceed if container exists
     if ($containerExists) {
-        # Get all special canaries - PKI templates, domain policies, and other non-standard types
-        $specialTypes = @('pKICertificateTemplate', 'domainPolicy')
-        $specialObjects = $SpecialCanaries | Where-Object { $specialTypes -contains $_.Type }
-        
         # Track all created objects for later permission application
         $createdObjectDNs = @()
         
-        foreach ($specialObject in $specialObjects) {
-            $objectName = $specialObject.Name
-            $objectType = $specialObject.Type
-            $objectDN = "CN=$objectName,$containerDN"
+        # Process PKI certificate templates first
+        $pkiTemplates = $SpecialCanaries | Where-Object { $_.Type -eq "pKICertificateTemplate" }
+        
+        foreach ($pkiTemplate in $pkiTemplates) {
+            $templateName = $pkiTemplate.Name
+            $templateDN = "CN=$templateName,$containerDN"
             
-            Write-Host "[i] Creating special object: $objectName (type: $objectType)" -ForegroundColor Cyan
+            Write-Host "[i] Creating PKI certificate template: $templateName" -ForegroundColor Cyan
             
-            # Check if object already exists
-            $objectExists = $false
+            # Check if the template already exists
+            $templateExists = $false
             try {
-                Get-ADObject -Identity $objectDN -ErrorAction Stop
-                $objectExists = $true
-                Write-Host "[-] Special object already exists: $objectDN" -ForegroundColor Yellow
-                $createdObjectDNs += $objectDN  # Add to our tracking list
+                Get-ADObject -Identity $templateDN -ErrorAction Stop
+                $templateExists = $true
+                Write-Host "[-] PKI certificate template already exists: $templateDN" -ForegroundColor Yellow
+                $createdObjectDNs += $templateDN  # Add to our tracking list
             } catch {
-                $objectExists = $false
+                $templateExists = $false
             }
             
-            if (-not $objectExists) {
+            if (-not $templateExists) {
                 try {
-                    # Create the placeholder container
-                    New-ADObject -Name $objectName -Type "container" -Path $containerDN -Description "$($specialObject.Description) (placeholder for $objectType)"
-                    Write-Host "[+] Created placeholder for $objectType : $objectDN" -ForegroundColor Green
-                    $createdObjectDNs += $objectDN  # Add to our tracking list
+                    # Create a pKICertificateTemplate object with required attributes
+                    
+                    # First create the base object
+                    New-ADObject -Name $templateName -Type "pKICertificateTemplate" -Path $containerDN -OtherAttributes @{
+                        'displayName' = $templateName
+                        'msPKI-Certificate-Name-Flag' = 1
+                        'msPKI-Enrollment-Flag' = 0
+                        'msPKI-Private-Key-Flag' = 16
+                        'msPKI-Certificate-Application-Policy' = @('1.3.6.1.5.5.7.3.2', '1.3.6.1.5.5.7.3.1')
+                        'msPKI-Template-Schema-Version' = 1
+                        'revision' = 100
+                        'pKIMaxIssuingDepth' = 0
+                        'pKIDefaultKeySpec' = 1
+                        'pKIKeyUsage' = @(0, 128)
+                        'pKIExpirationPeriod' = [byte[]](0x00, 0x40, 0x39, 0x87, 0x2E, 0xE1, 0xFE, 0xFF)
+                        'pKIOverlapPeriod' = [byte[]](0x00, 0x80, 0xA6, 0x0A, 0xFF, 0xDE, 0xFF, 0xFF)
+                    }
+                    
+                    Write-Host "[+] Created PKI certificate template: $templateDN" -ForegroundColor Green
+                    $createdObjectDNs += $templateDN  # Add to our tracking list
                     Start-Sleep -Seconds 2  # Brief delay
                 } catch {
-                    Write-Host "[!] Failed to create $objectType placeholder: $($_.Exception.Message)" -ForegroundColor Red
-                    continue  # Skip to the next object if creation fails
+                    Write-Host "[!] Failed to create PKI certificate template: $($_.Exception.Message)" -ForegroundColor Red
+                    
+                    # Fall back to creating a container placeholder
+                    try {
+                        Write-Host "[i] Creating placeholder container instead" -ForegroundColor Yellow
+                        New-ADObject -Name $templateName -Type "container" -Path $containerDN -Description "Placeholder for PKI certificate template: $templateName"
+                        Write-Host "[+] Created placeholder for PKI certificate template: $templateDN" -ForegroundColor Green
+                        $createdObjectDNs += $templateDN  # Add to our tracking list
+                    } catch {
+                        Write-Host "[!] Failed to create placeholder: $($_.Exception.Message)" -ForegroundColor Red
+                        continue  # Skip to the next object
+                    }
                 }
             }
             
             # First add audit SACL only - don't apply restrictive permissions yet
             try {
-                SetAuditSACL -DistinguishedName $objectDN
-                Write-Host "[+] Applied audit SACL to $objectDN" -ForegroundColor Green
+                SetAuditSACL -DistinguishedName $templateDN
+                Write-Host "[+] Applied audit SACL to $templateDN" -ForegroundColor Green
             } catch {
                 Write-Host "[!] Could not apply audit SACL: $($_.Exception.Message)" -ForegroundColor Yellow
             }
             
             # Add to group - with non-restrictive permissions in place
             try {
-                Add-ADGroupMember -Identity $CanaryGroup.distinguishedName -Members $objectDN -ErrorAction Stop
-                Write-Host "[+] Added $objectType to group" -ForegroundColor Green
+                Add-ADGroupMember -Identity $CanaryGroup.distinguishedName -Members $templateDN -ErrorAction Stop
+                Write-Host "[+] Added PKI template to group" -ForegroundColor Green
             } catch {
-                Write-Host "[!] Could not add $objectType to group: $($_.Exception.Message)" -ForegroundColor Red
+                Write-Host "[!] Could not add PKI template to group: $($_.Exception.Message)" -ForegroundColor Red
                 # Try alternative method if the first fails
                 try {
                     Write-Host "[i] Trying alternative method to add to group..." -ForegroundColor Cyan
-                    $group = Get-ADGroup -Identity $CanaryGroup.distinguishedName -Properties member
-                    Set-ADGroup -Identity $CanaryGroup.distinguishedName -Add @{member=$objectDN}
-                    Write-Host "[+] Added $objectType to group using alternative method" -ForegroundColor Green
+                    Set-ADGroup -Identity $CanaryGroup.distinguishedName -Add @{member=$templateDN}
+                    Write-Host "[+] Added PKI template to group using alternative method" -ForegroundColor Green
                 } catch {
                     Write-Host "[!] Alternative method also failed: $($_.Exception.Message)" -ForegroundColor Red
                 }
@@ -399,12 +422,97 @@ function CreateSpecialCanaries {
             
             # Record in output file
             try {
-                $createdObject = Get-ADObject -Identity $objectDN -Properties * -ErrorAction Stop
+                $createdObject = Get-ADObject -Identity $templateDN -Properties * -ErrorAction Stop
                 $name = $createdObject.Name
                 $guid = $createdObject.ObjectGUID
                 Add-Content -Path $Output "N/A,$guid,$name"
             } catch {
-                Write-Host "[!] Could not get $objectType properties: $($_.Exception.Message)" -ForegroundColor Yellow
+                Write-Host "[!] Could not get PKI template properties: $($_.Exception.Message)" -ForegroundColor Yellow
+            }
+        }
+        
+        # Process domain policies
+        $domainPolicies = $SpecialCanaries | Where-Object { $_.Type -eq "domainPolicy" }
+        
+        foreach ($policy in $domainPolicies) {
+            $policyName = $policy.Name
+            $policyDN = "CN=$policyName,$containerDN"
+            
+            Write-Host "[i] Creating domain policy: $policyName" -ForegroundColor Cyan
+            
+            # Check if the policy already exists
+            $policyExists = $false
+            try {
+                Get-ADObject -Identity $policyDN -ErrorAction Stop
+                $policyExists = $true
+                Write-Host "[-] Domain policy already exists: $policyDN" -ForegroundColor Yellow
+                $createdObjectDNs += $policyDN  # Add to our tracking list
+            } catch {
+                $policyExists = $false
+            }
+            
+            if (-not $policyExists) {
+                try {
+                    # Create a groupPolicyContainer object
+                    New-ADObject -Name $policyName -Type "groupPolicyContainer" -Path $containerDN -OtherAttributes @{
+                        'displayName' = $policyName
+                        'gPCFunctionalityVersion' = 2
+                        'flags' = 0
+                        'versionNumber' = 1
+                        'gPCFileSysPath' = "\\$env:USERDNSDOMAIN\sysvol\$env:USERDNSDOMAIN\Policies\{$([Guid]::NewGuid().ToString())}"
+                    }
+                    
+                    Write-Host "[+] Created domain policy: $policyDN" -ForegroundColor Green
+                    $createdObjectDNs += $policyDN  # Add to our tracking list
+                    Start-Sleep -Seconds 2  # Brief delay
+                } catch {
+                    Write-Host "[!] Failed to create domain policy: $($_.Exception.Message)" -ForegroundColor Red
+                    
+                    # Fall back to creating a container placeholder
+                    try {
+                        Write-Host "[i] Creating placeholder container instead" -ForegroundColor Yellow
+                        New-ADObject -Name $policyName -Type "container" -Path $containerDN -Description "Placeholder for domain policy: $policyName"
+                        Write-Host "[+] Created placeholder for domain policy: $policyDN" -ForegroundColor Green
+                        $createdObjectDNs += $policyDN  # Add to our tracking list
+                    } catch {
+                        Write-Host "[!] Failed to create placeholder: $($_.Exception.Message)" -ForegroundColor Red
+                        continue  # Skip to the next object
+                    }
+                }
+            }
+            
+            # First add audit SACL only - don't apply restrictive permissions yet
+            try {
+                SetAuditSACL -DistinguishedName $policyDN
+                Write-Host "[+] Applied audit SACL to $policyDN" -ForegroundColor Green
+            } catch {
+                Write-Host "[!] Could not apply audit SACL: $($_.Exception.Message)" -ForegroundColor Yellow
+            }
+            
+            # Add to group - with non-restrictive permissions in place
+            try {
+                Add-ADGroupMember -Identity $CanaryGroup.distinguishedName -Members $policyDN -ErrorAction Stop
+                Write-Host "[+] Added domain policy to group" -ForegroundColor Green
+            } catch {
+                Write-Host "[!] Could not add domain policy to group: $($_.Exception.Message)" -ForegroundColor Red
+                # Try alternative method if the first fails
+                try {
+                    Write-Host "[i] Trying alternative method to add to group..." -ForegroundColor Cyan
+                    Set-ADGroup -Identity $CanaryGroup.distinguishedName -Add @{member=$policyDN}
+                    Write-Host "[+] Added domain policy to group using alternative method" -ForegroundColor Green
+                } catch {
+                    Write-Host "[!] Alternative method also failed: $($_.Exception.Message)" -ForegroundColor Red
+                }
+            }
+            
+            # Record in output file
+            try {
+                $createdObject = Get-ADObject -Identity $policyDN -Properties * -ErrorAction Stop
+                $name = $createdObject.Name
+                $guid = $createdObject.ObjectGUID
+                Add-Content -Path $Output "N/A,$guid,$name"
+            } catch {
+                Write-Host "[!] Could not get domain policy properties: $($_.Exception.Message)" -ForegroundColor Yellow
             }
         }
         
@@ -421,7 +529,7 @@ function CreateSpecialCanaries {
                 DenyAllOnCanariesAndChangeOwner -DistinguishedName $objectDN -Owner $Owner
                 Write-Host "[+] Applied restrictive permissions to: $objectDN" -ForegroundColor Green
             } catch {
-                Write-Host "[!] Failed to apply restrictive permissions to $objectDN : $($_.Exception.Message)" -ForegroundColor Red
+                Write-Host "[!] Failed to apply restrictive permissions to $objectDN: $($_.Exception.Message)" -ForegroundColor Red
             }
         }
         
