@@ -724,24 +724,24 @@ function CreateSpecialCanaries {
                                 if ($gpoClassError -match "no such object" -or $gpoClassError -match "class-schema") {
                                     Write-Host "[!] GPO schema isn't available. Creating container placeholder instead." -ForegroundColor Yellow
                                     
-                                    # Create a container placeholder with GPO-like attributes
-                                    try {
-                                        $placeholderName = "${policyName}-placeholder"
-                                        New-ADObject -Name $placeholderName -Type "container" -Path $containerDN -Description "Placeholder for domain policy: $policyName"
-                                        
-                                        # Add some GPO-like attributes to make it more realistic
-                                        $placeholderDN = "CN=$placeholderName,$containerDN"
-                                        Set-ADObject -Identity $placeholderDN -Add @{
-                                            'displayName' = $policyName
-                                            'description' = "Group Policy Canary (placeholder)"
-                                            'info' = "Original GPO creation failed: $gpoClassError"
-                                        }
-                                        
-                                        Write-Host "[+] Created GPO placeholder container: $placeholderDN" -ForegroundColor Green
-                                        $createdObjectDNs += $placeholderDN
-                                    } catch {
-                                        Write-Host "[!] Failed to create even a placeholder: $($_.Exception.Message)" -ForegroundColor Red
+                                    # Create a more enticing GPO canary with sensitive-looking attributes
+                                    $placeholderName = $policyName
+                                    $sensitiveDescription = "Privileged Access Policy - DO NOT MODIFY"
+
+                                    New-ADObject -Name $placeholderName -Type "container" -Path $containerDN -Description $sensitiveDescription -OtherAttributes @{
+                                        'displayName' = "Restricted Admin Access Policy"
+                                        'info' = "Contains privileged account access rules and domain admin equivalent permissions"
+                                        'gPLink' = "[LDAP://CN=Domain Controllers,$((Get-ADDomain).DistinguishedName);0]"  # Make it look like it's linked to DCs
+                                        'whenChanged' = (Get-Date).AddDays(-1)  # Make it look recently modified
                                     }
+
+                                    # Add custom attributes to make it look like it contains sensitive settings
+                                    Set-ADObject -Identity "CN=$placeholderName,$containerDN" -Add @{
+                                        'keywords' = @("PrivilegedAccess", "AdminRights", "DomainAdmins")
+                                        'wWWHomePage' = "\\$env:USERDNSDOMAIN\NETLOGON\RestrictedAccess"
+                                    }
+
+                                    Write-Host "[+] Created enticing Group Policy canary: CN=$placeholderName,$containerDN" -ForegroundColor Green
                                 } else {
                                     Write-Host "[!] Minimal GPO creation also failed: $gpoClassError" -ForegroundColor Red
                                 }
