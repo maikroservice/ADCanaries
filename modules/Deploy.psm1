@@ -120,49 +120,84 @@ function DeployCanaries {
     Remove-Item -Path $Output -ErrorAction SilentlyContinue
     Add-Content -Path $Output "CanarySamName,CanaryGUID,CanaryName"
 
-    # Ensure Parent container exists
+    # Ensure Parent container exists using Get-ADObject directly
     $Path = $CanaryOU.Path
-    if(-not (ADObjectExists -Path $Path)){
-        Write-Host "[-] Parent OU for default Canary OU not found : $Path -- aborting deployment"
+    try {
+        $parentOU = Get-ADObject -Identity $Path -ErrorAction Stop
+        Write-Host "[+] Parent OU found: $Path" -ForegroundColor Green
+    } catch {
+        Write-Host "[!] Parent OU for default Canary OU not found: $Path -- aborting deployment" -ForegroundColor Red
+        Write-Host "[!] Error details: $($_.Exception.Message)" -ForegroundColor Red
         exit $false
     }
 
-    # Create OU for Canaries - FORCED to use organizationalUnit
-    $DistinguishedName = "OU="+$CanaryOU.Name+","+$CanaryOU.Path
-    if (ADObjectExists -Path $DistinguishedName){
-        Write-Host "[-] Canary OU already existed : $DistinguishedName"
+    # Create OU for Canaries
+    $DistinguishedName = "OU=" + $CanaryOU.Name + "," + $CanaryOU.Path
+    
+    # First check if the OU already exists
+    $ouExists = $false
+    try {
+        Get-ADOrganizationalUnit -Identity $DistinguishedName -ErrorAction Stop
+        Write-Host "[-] Canary OU already existed : $DistinguishedName" -ForegroundColor Yellow
+        $ouExists = $true
+    } catch {
+        # OU doesn't exist, we'll create it
+        $ouExists = $false
     }
-    else {
-        # HARDCODING to use New-ADOrganizationalUnit directly, ignoring the type from config
-        Write-Host "DIAGNOSTIC: Creating OU with New-ADOrganizationalUnit cmdlet"
-        New-ADOrganizationalUnit -Name $CanaryOU.Name -Path $CanaryOU.Path -Description $CanaryOU.Description
-        
-        # Configure the OU
-        Set-ADObject -Identity $DistinguishedName -ProtectedFromAccidentalDeletion $False
-        $ACL = Get-Acl -Path "AD:/$DistinguishedName"
-        $ACL.SetAccessRuleProtection($true, $false)
-        $ACL | Set-Acl -Path "AD:/$DistinguishedName"
-        Write-Host "[*] Canary OU created and inheritance disabled : $DistinguishedName"
-        
-        # DIAGNOSTIC: Get the created object and check its type
-        $createdOU = Get-ADObject -Identity $DistinguishedName -Properties objectClass
-        Write-Host "DIAGNOSTIC: Created OU objectClass = $($createdOU.objectClass)"
+    
+    if (-not $ouExists) {
+        try {
+            Write-Host "DIAGNOSTIC: Creating OU with New-ADOrganizationalUnit cmdlet"
+            New-ADOrganizationalUnit -Name $CanaryOU.Name -Path $CanaryOU.Path -Description $CanaryOU.Description
+            
+            # Configure the OU
+            Set-ADObject -Identity $DistinguishedName -ProtectedFromAccidentalDeletion $False
+            $ACL = Get-Acl -Path "AD:/$DistinguishedName"
+            $ACL.SetAccessRuleProtection($true, $false)
+            $ACL | Set-Acl -Path "AD:/$DistinguishedName"
+            Write-Host "[*] Canary OU created and inheritance disabled : $DistinguishedName" -ForegroundColor Green
+            
+            # Verify the OU was created properly
+            $createdOU = Get-ADObject -Identity $DistinguishedName -Properties objectClass
+            Write-Host "DIAGNOSTIC: Created OU objectClass = $($createdOU.objectClass)"
+        } catch {
+            Write-Host "[!] Failed to create Canary OU: $($_.Exception.Message)" -ForegroundColor Red
+            exit $false
+        }
     }
 
     # Create Primary Group for Canaries
     $DistinguishedName = "CN="+$CanaryGroup.Name+","+$CanaryGroup.Path
-    if (ADObjectExists -Path $DistinguishedName){
-        Write-Host "[-] Canary Primary Group already existed : $DistinguishedName"
+    
+    # Check if group exists using direct AD cmdlet
+    $groupExists = $false
+    try {
+        Get-ADGroup -Identity $DistinguishedName -ErrorAction Stop
+        Write-Host "[-] Canary Primary Group already existed : $DistinguishedName" -ForegroundColor Yellow
+        $groupExists = $true
+    } catch {
+        $groupExists = $false
     }
-    else {
-        New-ADGroup -Name $CanaryGroup.Name -GroupCategory Security -GroupScope Global -DisplayName $CanaryGroup.Name -Path $CanaryGroup.Path -Description $CanaryGroup.Description
-        Set-ADObject -Identity $DistinguishedName -ProtectedFromAccidentalDeletion $False
-        $ACL = Get-Acl -Path "AD:/$DistinguishedName"
-        $ACL.SetAccessRuleProtection($true, $false)
-        $ACL | Set-Acl -Path "AD:/$DistinguishedName"
-        Write-Host "[*] Canary Group created and inheritance disabled : $DistinguishedName"
+    
+    if (-not $groupExists) {
+        try {
+            New-ADGroup -Name $CanaryGroup.Name -GroupCategory Security -GroupScope Global -DisplayName $CanaryGroup.Name -Path $CanaryGroup.Path -Description $CanaryGroup.Description
+            Set-ADObject -Identity $DistinguishedName -ProtectedFromAccidentalDeletion $False
+            $ACL = Get-Acl -Path "AD:/$DistinguishedName"
+            $ACL.SetAccessRuleProtection($true, $false)
+            $ACL | Set-Acl -Path "AD:/$DistinguishedName"
+            Write-Host "[*] Canary Group created and inheritance disabled : $DistinguishedName" -ForegroundColor Green
+        } catch {
+            Write-Host "[!] Failed to create Canary Group: $($_.Exception.Message)" -ForegroundColor Red
+        }
     }
-    $CanaryGroup = (Get-ADGroup -Identity "$DistinguishedName" -Properties *)
+    
+    try {
+        $CanaryGroup = Get-ADGroup -Identity "$DistinguishedName" -Properties *
+    } catch {
+        Write-Host "[!] Could not retrieve Canary Group: $($_.Exception.Message)" -ForegroundColor Red
+        exit $false
+    }
 
     # Create Canaries
     foreach ($Canary in $Canaries) {
@@ -171,10 +206,14 @@ function DeployCanaries {
 
     # Deny all canary OU no audit
     $DN = "OU="+$CanaryOU.Name+","+$CanaryOU.Path
-    DenyAllOnCanariesAndChangeOwner -DistinguishedName $DN -Owner $CanaryOwner
+    try {
+        DenyAllOnCanariesAndChangeOwner -DistinguishedName $DN -Owner $CanaryOwner
+    } catch {
+        Write-Host "[!] Failed to set permissions on Canary OU: $($_.Exception.Message)" -ForegroundColor Red
+    }
 
     # Output
-    Write-Host "`n[*] Done. Lookup Name:Guid for created objects :`n"
+    Write-Host "`n[*] Done. Lookup Name:Guid for created objects :`n" -ForegroundColor Green
     Get-Content -Path $Output
 }
 

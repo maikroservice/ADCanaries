@@ -1,10 +1,16 @@
 function ADObjectExists {
     param($Path)
-    try{
+    try {
+        # First try using Get-ADObject directly
         Get-ADObject -Identity "$Path" -ErrorAction Stop
         return $True
+    } catch [Microsoft.ActiveDirectory.Management.ADIdentityNotFoundException] {
+        # Object not found
+        Write-Host "[-] AD Object not found: $Path" -ForegroundColor Yellow
+        return $False
     } catch {
-        Write-Error $_
+        # Other error
+        Write-Host "[-] Error checking AD Object: $($_.Exception.Message)" -ForegroundColor Red
         return $False
     }
 }
