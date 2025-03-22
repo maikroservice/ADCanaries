@@ -34,13 +34,20 @@ function CreateCanary {
 
     $CanaryGroupDN = $CanaryGroup.distinguishedName
     $CanaryGroupToken = (Get-ADGroup $CanaryGroupDN -Properties @("primaryGroupToken")).primaryGroupToken
-    $DistinguishedName = "CN="+$Canary.Name+","+$Canary.Path
+    
+    # Different prefixes for different object types
+    $prefix = "CN="
+    if ($Canary.Type -eq "organizationalUnit") {
+        $prefix = "OU="
+    }
+    
+    $DistinguishedName = "$prefix"+$Canary.Name+","+$Canary.Path
 
     if (ADObjectExists -Path $DistinguishedName){
-        Write-Host "[-] Canary User already existed : $DistinguishedName"
+        Write-Host "[-] Canary object already existed : $DistinguishedName"
     }
     else {
-        # Check type and use appropriate cmdlet
+        # Create the appropriate object based on type
         switch ($Canary.Type) {
             "user" {
                 New-ADUser -Name $Canary.Name -Path $Canary.Path -Description $Canary.Description -Enabled $false
@@ -55,24 +62,29 @@ function CreateCanary {
                 New-ADOrganizationalUnit -Name $Canary.Name -Path $Canary.Path -Description $Canary.Description
             }
             default {
+                # Fall back to New-ADObject for other types
                 New-ADObject -Name $Canary.Name -Path $Canary.Path -Type $Canary.Type -Description $Canary.Description
             }
         }
         
+        # Get the created object
         $CanaryObject = (Get-ADObject $DistinguishedName -Properties *)
 
-        # Add Canary to CanaryGroup and set primary group (only for users and computers)
-        if ($Canary.Type -eq "user" -or $Canary.Type -eq "computer") {
-            Add-ADGroupMember -Identity $CanaryGroupDN -Members $DistinguishedName
-            Set-ADObject $DistinguishedName -replace @{primaryGroupID=$CanaryGroupToken}
-        } 
-        elseif ($Canary.Type -eq "group") {
-            Add-ADGroupMember -Identity $CanaryGroupDN -Members $DistinguishedName
-        }
-        
-        foreach($G in $CanaryObject.MemberOf){
-            if ($G -ne $CanaryGroupDN) {
-                Remove-ADGroupMember -Identity $G -Members $DistinguishedName -Confirm:$false
+        # Handle group membership appropriately
+        if ($Canary.Type -ne "organizationalUnit") {
+            # Add to CanaryGroup if not an OU
+            Add-ADGroupMember -Identity $CanaryGroupDN -Members $DistinguishedName -ErrorAction SilentlyContinue
+            
+            # Set primary group for users and computers
+            if ($Canary.Type -eq "user" -or $Canary.Type -eq "computer") {
+                Set-ADObject $DistinguishedName -replace @{primaryGroupID=$CanaryGroupToken} -ErrorAction SilentlyContinue
+            }
+            
+            # Clean up other group memberships
+            foreach($G in $CanaryObject.MemberOf){
+                if ($G -ne $CanaryGroupDN) {
+                    Remove-ADGroupMember -Identity $G -Members $DistinguishedName -Confirm:$false -ErrorAction SilentlyContinue
+                }
             }
         }
         
@@ -80,6 +92,8 @@ function CreateCanary {
         SetAuditSACL -DistinguishedName $DistinguishedName
         Set-ADObject -Identity $DistinguishedName -ProtectedFromAccidentalDeletion $False
         DenyAllOnCanariesAndChangeOwner -DistinguishedName $DistinguishedName -Owner $Owner
+        
+        # Record the created object
         $SamAccountName = $CanaryObject.SamAccountName
         $Name = $CanaryObject.Name
         $Guid = $CanaryObject.ObjectGUID
@@ -110,13 +124,16 @@ function DeployCanaries {
         exit $false
     }
 
-    # Create OU for Canaries
+    # Create OU for Canaries - using New-ADOrganizationalUnit explicitly
     $DistinguishedName = "OU="+$CanaryOU.Name+","+$CanaryOU.Path
     if (ADObjectExists -Path $DistinguishedName){
         Write-Host "[-] Canary OU already existed : $DistinguishedName"
     }
     else {
+        # Use New-ADOrganizationalUnit directly
         New-ADOrganizationalUnit -Name $CanaryOU.Name -Path $CanaryOU.Path -Description $CanaryOU.Description
+        
+        # Configure the OU
         Set-ADObject -Identity $DistinguishedName -ProtectedFromAccidentalDeletion $False
         $ACL = Get-Acl -Path "AD:/$DistinguishedName"
         $ACL.SetAccessRuleProtection($true, $false)

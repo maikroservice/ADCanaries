@@ -62,6 +62,7 @@ function PopulateConf {
 
     $ConfigJsonObject = @{}
     $ConfigJsonObject.Configuration = @{}
+    $ConfigJsonObject.Configuration.CanaryOwner = $Owner
 
     # Check if ParentOU exists
     if(-not (Get-ADObject -Filter *).DistinguishedName -contains $ParentOU) {
@@ -74,7 +75,7 @@ function PopulateConf {
 
     $ConfigJsonObject.Configuration.CanaryOU = @{}
     $ConfigJsonObject.Configuration.CanaryOU.Name = "$CanaryGroupName"
-    $ConfigJsonObject.Configuration.CanaryOU.Type = "OU"
+    $ConfigJsonObject.Configuration.CanaryOU.Type = "organizationalUnit"
     $ConfigJsonObject.Configuration.CanaryOU.Path = "$ParentOU"
     $ConfigJsonObject.Configuration.CanaryOU.OtherAttributes = @{}
     $ConfigJsonObject.Configuration.CanaryOU.Description = "[ADCanaries] Default OU"
@@ -90,12 +91,14 @@ function PopulateConf {
     $ConfigJsonObject.Configuration.CanaryGroup.Description = "[ADCanaries] Default group"
     $ConfigJsonObject.Configuration.CanaryGroup.ProtectedFromAccidentalDeletion = 1
 
-    $ConfigJsonObject.Configuration.CanaryOwner = $Owner
-
     $ConfigJsonObject.Canaries = New-Object System.Collections.ArrayList
 
     DefaultCanaries -ConfigJsonObject $ConfigJsonObject -ParentOU $CanariesPath
-    Add-Content -Path $Config ($ConfigJsonObject | ConvertTo-Json -Depth 20)
+    
+    # Write the configuration to file
+    $ConfigJsonObject | ConvertTo-Json -Depth 20 | Set-Content -Path $Config
+
+    Write-Host "[*] Configuration saved to: $Config"
 }
 
 # Export functions
