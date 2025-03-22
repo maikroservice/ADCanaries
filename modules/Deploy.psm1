@@ -40,18 +40,42 @@ function CreateCanary {
         Write-Host "[-] Canary User already existed : $DistinguishedName"
     }
     else {
-        New-ADObject -Name $Canary.Name -Path $Canary.Path -Type $Canary.Type
+        # Check type and use appropriate cmdlet
+        switch ($Canary.Type) {
+            "user" {
+                New-ADUser -Name $Canary.Name -Path $Canary.Path -Description $Canary.Description -Enabled $false
+            }
+            "group" {
+                New-ADGroup -Name $Canary.Name -GroupCategory Security -GroupScope Global -Path $Canary.Path -Description $Canary.Description
+            }
+            "computer" {
+                New-ADComputer -Name $Canary.Name -Path $Canary.Path -Description $Canary.Description -Enabled $false
+            }
+            "organizationalUnit" {
+                New-ADOrganizationalUnit -Name $Canary.Name -Path $Canary.Path -Description $Canary.Description
+            }
+            default {
+                New-ADObject -Name $Canary.Name -Path $Canary.Path -Type $Canary.Type -Description $Canary.Description
+            }
+        }
+        
         $CanaryObject = (Get-ADObject $DistinguishedName -Properties *)
 
-        # Add Canary to CanaryGroup and set primary group
-        Add-ADGroupMember -Identity $CanaryGroupDN -Members $DistinguishedName
-        if ($Canary.Type -ne "group"){
+        # Add Canary to CanaryGroup and set primary group (only for users and computers)
+        if ($Canary.Type -eq "user" -or $Canary.Type -eq "computer") {
+            Add-ADGroupMember -Identity $CanaryGroupDN -Members $DistinguishedName
             Set-ADObject $DistinguishedName -replace @{primaryGroupID=$CanaryGroupToken}
+        } 
+        elseif ($Canary.Type -eq "group") {
+            Add-ADGroupMember -Identity $CanaryGroupDN -Members $DistinguishedName
         }
-
+        
         foreach($G in $CanaryObject.MemberOf){
-            Remove-ADGroupMember -Identity $G -Members $DistinguishedName
+            if ($G -ne $CanaryGroupDN) {
+                Remove-ADGroupMember -Identity $G -Members $DistinguishedName -Confirm:$false
+            }
         }
+        
         Write-Host "[*] Canary created : $DistinguishedName"
         SetAuditSACL -DistinguishedName $DistinguishedName
         Set-ADObject -Identity $DistinguishedName -ProtectedFromAccidentalDeletion $False
@@ -67,7 +91,7 @@ function DeployCanaries {
     param($Config, $Output)
     ValidateAction
     
-    # Retreive Configuration from JSON file
+    # Retrieve Configuration from JSON file
     $ADCanariesJson = Get-Content -Path $Config | ConvertFrom-Json
     $Configuration = $ADCanariesJson.Configuration
     $CanaryGroup = $Configuration.CanaryGroup
