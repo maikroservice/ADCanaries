@@ -558,4 +558,4 @@ function DeployCanaries {
 }
 
 # Export functions
-Export-ModuleMember -Function SetAuditSACL, DenyAllOnCanariesAndChangeOwner, CreateCanary, DeployCanaries
+Export-ModuleMember -Function SetAuditSACL, DenyAllOnCanariesAndChangeOwner, CreateCanary, CreateSpecialCanaries, DeployCanaries
