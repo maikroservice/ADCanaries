@@ -41,6 +41,41 @@ function CreateCanary {
         $prefix = "OU="
     }
     
+    # Keep track of the original path for all objects
+    $originalPath = $Canary.Path
+    
+    # Handle special objects that need custom handling
+    if ($Canary.Type -eq "pKICertificateTemplate" -or $Canary.Type -eq "domainPolicy") {
+        # Create a PKI container in the parent OU if it doesn't exist yet
+        $containerName = "PKI-Canaries"
+        $containerDN = "CN=$containerName,$originalPath"
+        
+        # Check if the container exists
+        $containerExists = $false
+        try {
+            Get-ADObject -Identity $containerDN -ErrorAction Stop
+            $containerExists = $true
+        } catch {
+            $containerExists = $false
+        }
+        
+        # Create the container if needed
+        if (-not $containerExists) {
+            try {
+                New-ADObject -Name $containerName -Type "container" -Path $originalPath -Description "Container for PKI and Policy canaries"
+                Write-Host "[+] Created PKI container: $containerDN" -ForegroundColor Green
+            } catch {
+                Write-Host "[!] Failed to create PKI container: $($_.Exception.Message)" -ForegroundColor Red
+                # Continue with original path if we can't create container
+                $containerDN = $originalPath
+            }
+        }
+        
+        # Update the path to use the container
+        $Canary.Path = $containerDN
+        Write-Host "[i] Using PKI container for $($Canary.Type): $containerDN" -ForegroundColor Cyan
+    }
+    
     $DistinguishedName = "$prefix"+$Canary.Name+","+$Canary.Path
 
     # Log creation attempt
@@ -100,34 +135,61 @@ function CreateCanary {
                     New-ADOrganizationalUnit -Name $Canary.Name -Path $Canary.Path -Description $Canary.Description
                     # Note: OUs cannot be members of groups, so we skip group operations
                 }
-                default {
-                    # Special handling for other object types
-                    Write-Host "[i] Creating special object type: $($Canary.Type)" -ForegroundColor Cyan
+                "pKICertificateTemplate" {
+                    # Create a placeholder object for PKI Certificate Template
+                    Write-Host "[i] Creating placeholder for PKI Certificate Template" -ForegroundColor Cyan
+                    New-ADObject -Name $Canary.Name -Path $Canary.Path -Type "container" -Description "$($Canary.Description) (placeholder for pKICertificateTemplate)"
                     
-                    # Try to create the object but don't fail if it doesn't work perfectly
+                    # Try to add to the group
+                    try {
+                        Add-ADGroupMember -Identity $CanaryGroupDN -Members $DistinguishedName -ErrorAction Stop
+                        Write-Host "[+] Added PKI template placeholder to group" -ForegroundColor Green
+                    } catch {
+                        Write-Host "[!] Could not add PKI template placeholder to group: $($_.Exception.Message)" -ForegroundColor Yellow
+                    }
+                }
+                "domainPolicy" {
+                    # Create a placeholder for domain policy
+                    Write-Host "[i] Creating placeholder for domain policy" -ForegroundColor Cyan
+                    New-ADObject -Name $Canary.Name -Path $Canary.Path -Type "container" -Description "$($Canary.Description) (placeholder for domainPolicy)"
+                    
+                    # Try to add to the group
+                    try {
+                        Add-ADGroupMember -Identity $CanaryGroupDN -Members $DistinguishedName -ErrorAction Stop
+                        Write-Host "[+] Added policy placeholder to group" -ForegroundColor Green
+                    } catch {
+                        Write-Host "[!] Could not add policy placeholder to group: $($_.Exception.Message)" -ForegroundColor Yellow
+                    }
+                }
+                default {
+                    # Generic handling for other types
+                    Write-Host "[i] Creating object of type: $($Canary.Type)" -ForegroundColor Cyan
+                    
                     try {
                         New-ADObject -Name $Canary.Name -Path $Canary.Path -Type $Canary.Type -Description $Canary.Description
                         Write-Host "[+] Created $($Canary.Type) object: $DistinguishedName" -ForegroundColor Green
-                    } catch {
-                        Write-Host "[!] Warning: Could not create $($Canary.Type) object. This might be normal: $($_.Exception.Message)" -ForegroundColor Yellow
-                        # Create a simple placeholder object instead - using the "container" type which is generic
+                        
+                        # Try to add to the group
                         try {
-                            New-ADObject -Name $Canary.Name -Path $Canary.Path -Type "container" -Description "$($Canary.Description) (placeholder for $($Canary.Type))"
-                            Write-Host "[+] Created placeholder container instead" -ForegroundColor Green
-                            # Update the distinguished name to use the container object
-                            $DistinguishedName = "CN="+$Canary.Name+","+$Canary.Path
+                            Add-ADGroupMember -Identity $CanaryGroupDN -Members $DistinguishedName -ErrorAction Stop
+                            Write-Host "[+] Added to group" -ForegroundColor Green
                         } catch {
-                            Write-Host "[!] Could not create placeholder either: $($_.Exception.Message)" -ForegroundColor Red
-                            return
+                            Write-Host "[!] Could not add to group: $($_.Exception.Message)" -ForegroundColor Yellow
                         }
-                    }
-                    
-                    # For special types, we'll try to add to the group but handle failures gracefully
-                    try {
-                        Add-ADGroupMember -Identity $CanaryGroupDN -Members $DistinguishedName -ErrorAction Stop
-                        Write-Host "[+] Added $($Canary.Type) to canary group" -ForegroundColor Green
                     } catch {
-                        Write-Host "[!] Could not add $($Canary.Type) to group. This may be normal: $($_.Exception.Message)" -ForegroundColor Yellow
+                        Write-Host "[!] Could not create object: $($_.Exception.Message)" -ForegroundColor Red
+                        
+                        # Create a placeholder
+                        New-ADObject -Name $Canary.Name -Path $Canary.Path -Type "container" -Description "$($Canary.Description) (placeholder for $($Canary.Type))"
+                        Write-Host "[+] Created placeholder container instead" -ForegroundColor Green
+                        
+                        # Try to add the placeholder to the group
+                        try {
+                            Add-ADGroupMember -Identity $CanaryGroupDN -Members $DistinguishedName -ErrorAction Stop
+                            Write-Host "[+] Added placeholder to group" -ForegroundColor Green
+                        } catch {
+                            Write-Host "[!] Could not add placeholder to group: $($_.Exception.Message)" -ForegroundColor Yellow
+                        }
                     }
                 }
             }
