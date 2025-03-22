@@ -359,80 +359,135 @@ function CreateSpecialCanaries {
             
             if (-not $templateExists) {
                 try {
-                    # Check if the pKICertificateTemplate schema class exists
-                    $schemaExists = $false
-                    try {
-                        $schemaNC = (Get-ADRootDSE).schemaNamingContext
-                        $pKITemplateSchema = Get-ADObject -Identity "CN=PKI-Certificate-Template,$schemaNC" -ErrorAction SilentlyContinue
-                        $schemaExists = ($pKITemplateSchema -ne $null)
+                    # First, try to identify which attributes should only have single values
+                    $schemaNC = (Get-ADRootDSE).schemaNamingContext
+                    
+                    Write-Host "[i] Analyzing schema for PKI template attribute definitions..." -ForegroundColor Cyan
+                    # Create a hashtable to track which attributes are single-valued vs multi-valued
+                    $attributeDefinitions = @{}
+                    
+                    function Get-AttributeValuesType {
+                        param($AttributeName)
                         
-                        if ($schemaExists) {
-                            Write-Host "[+] PKI schema extensions are available" -ForegroundColor Green
-                        } else {
-                            Write-Host "[!] PKI schema extensions not found. This is required for certificate templates." -ForegroundColor Yellow
+                        try {
+                            $attributeSchema = Get-ADObject -Filter "lDAPDisplayName -eq '$AttributeName'" -SearchBase $schemaNC -Properties isSingleValued
+                            return @{
+                                Name = $AttributeName
+                                IsSingleValued = $attributeSchema.isSingleValued
+                            }
+                        } catch {
+                            # If we can't find the attribute schema, assume it's single-valued to be safe
+                            Write-Host "[!] Could not find schema definition for attribute $AttributeName" -ForegroundColor Yellow
+                            return @{
+                                Name = $AttributeName
+                                IsSingleValued = $true
+                            }
                         }
-                    } catch {
-                        Write-Host "[!] Error checking PKI schema: $($_.Exception.Message)" -ForegroundColor Yellow
                     }
                     
-                    # Create a pKICertificateTemplate object with required attributes
-                    $templateAttributes = @{
+                    # Create a pKICertificateTemplate object with required attributes, carefully tracking which are single/multi-valued
+                    $templateAttributes = @{}
+                    
+                    # First set of attributes that are definitely single-valued
+                    $singleValuedAttributes = @{
                         'displayName' = $templateName
-                        'msPKI-Certificate-Name-Flag' = 1
-                        'msPKI-Enrollment-Flag' = 0
-                        'msPKI-Private-Key-Flag' = 16
                         'pKIMaxIssuingDepth' = 0
                         'pKIDefaultKeySpec' = 1
                     }
                     
-                    # Try to add these attributes, but they may not be available in all schemas
+                    # Add each single-valued attribute and log it
+                    foreach ($key in $singleValuedAttributes.Keys) {
+                        $templateAttributes[$key] = $singleValuedAttributes[$key]
+                        $attributeDefinitions[$key] = @{ IsSingleValued = $true }
+                        Write-Host "[+] Adding single-valued attribute: $key = $($singleValuedAttributes[$key])" -ForegroundColor Green
+                    }
+                    
+                    # Now handle potentially multi-valued attributes with careful checking
+                    $attributesToCheck = @(
+                        @{ Name = 'msPKI-Certificate-Name-Flag'; Value = 1 },
+                        @{ Name = 'msPKI-Enrollment-Flag'; Value = 0 },
+                        @{ Name = 'msPKI-Private-Key-Flag'; Value = 16 },
+                        @{ Name = 'msPKI-Template-Schema-Version'; Value = 1 },
+                        @{ Name = 'revision'; Value = 100 }
+                    )
+                    
+                    foreach ($attr in $attributesToCheck) {
+                        $attrDef = Get-AttributeValuesType -AttributeName $attr.Name
+                        $attributeDefinitions[$attr.Name] = $attrDef
+                        
+                        if ($attrDef.IsSingleValued) {
+                            Write-Host "[+] Adding single-valued attribute: $($attr.Name) = $($attr.Value)" -ForegroundColor Green
+                            $templateAttributes[$attr.Name] = $attr.Value
+                        } else {
+                            Write-Host "[+] Adding multi-valued attribute: $($attr.Name) = $($attr.Value)" -ForegroundColor Green
+                            $templateAttributes[$attr.Name] = @($attr.Value)
+                        }
+                    }
+                    
+                    # Handle known multi-valued attributes carefully
+                    # The error is likely in pKIKeyUsage or msPKI-Certificate-Application-Policy
+                    
+                    # For pKIKeyUsage, check if it's multi-valued and format accordingly
+                    $pKIKeyUsageAttr = Get-AttributeValuesType -AttributeName 'pKIKeyUsage'
+                    $attributeDefinitions['pKIKeyUsage'] = $pKIKeyUsageAttr
+                    
+                    if ($pKIKeyUsageAttr.IsSingleValued) {
+                        # If it's single-valued, just use the first value (128)
+                        Write-Host "[+] Adding single-valued pKIKeyUsage = 128" -ForegroundColor Green
+                        $templateAttributes['pKIKeyUsage'] = 128  # Just use a single value
+                    } else {
+                        # If it's multi-valued, use an array with proper byte type
+                        Write-Host "[+] Adding multi-valued pKIKeyUsage = (0, 128)" -ForegroundColor Green
+                        $templateAttributes['pKIKeyUsage'] = [byte[]]@(0, 128)
+                    }
+                    
+                    # For msPKI-Certificate-Application-Policy, check if it's multi-valued
+                    $appPolicyAttr = Get-AttributeValuesType -AttributeName 'msPKI-Certificate-Application-Policy'
+                    $attributeDefinitions['msPKI-Certificate-Application-Policy'] = $appPolicyAttr
+                    
+                    if ($appPolicyAttr.IsSingleValued) {
+                        # If it's single-valued, just use the first value
+                        Write-Host "[+] Adding single-valued msPKI-Certificate-Application-Policy = 1.3.6.1.5.5.7.3.2" -ForegroundColor Green
+                        $templateAttributes['msPKI-Certificate-Application-Policy'] = "1.3.6.1.5.5.7.3.2"
+                    } else {
+                        # If it's multi-valued, use an array
+                        Write-Host "[+] Adding multi-valued msPKI-Certificate-Application-Policy = (1.3.6.1.5.5.7.3.2, 1.3.6.1.5.5.7.3.1)" -ForegroundColor Green
+                        $templateAttributes['msPKI-Certificate-Application-Policy'] = @("1.3.6.1.5.5.7.3.2", "1.3.6.1.5.5.7.3.1")
+                    }
+                    
+                    # For binary attributes, handle them carefully
                     try {
-                        $templateAttributes['msPKI-Certificate-Application-Policy'] = @('1.3.6.1.5.5.7.3.2', '1.3.6.1.5.5.7.3.1')
+                        Write-Host "[+] Adding pKIExpirationPeriod as binary value" -ForegroundColor Green
+                        $templateAttributes['pKIExpirationPeriod'] = [byte[]]@(0x00, 0x40, 0x39, 0x87, 0x2E, 0xE1, 0xFE, 0xFF)
                     } catch {
-                        Write-Host "[i] Could not set msPKI-Certificate-Application-Policy attribute" -ForegroundColor Yellow
+                        Write-Host "[!] Could not set pKIExpirationPeriod attribute: $($_.Exception.Message)" -ForegroundColor Yellow
                     }
                     
                     try {
-                        $templateAttributes['msPKI-Template-Schema-Version'] = 1
+                        Write-Host "[+] Adding pKIOverlapPeriod as binary value" -ForegroundColor Green
+                        $templateAttributes['pKIOverlapPeriod'] = [byte[]]@(0x00, 0x80, 0xA6, 0x0A, 0xFF, 0xDE, 0xFF, 0xFF)
                     } catch {
-                        Write-Host "[i] Could not set msPKI-Template-Schema-Version attribute" -ForegroundColor Yellow
+                        Write-Host "[!] Could not set pKIOverlapPeriod attribute: $($_.Exception.Message)" -ForegroundColor Yellow
                     }
                     
-                    try {
-                        $templateAttributes['revision'] = 100
-                    } catch {
-                        Write-Host "[i] Could not set revision attribute" -ForegroundColor Yellow
-                    }
-                    
-                    try {
-                        $templateAttributes['pKIKeyUsage'] = @(0, 128)
-                    } catch {
-                        Write-Host "[i] Could not set pKIKeyUsage attribute" -ForegroundColor Yellow
-                    }
-                    
-                    try {
-                        $templateAttributes['pKIExpirationPeriod'] = [byte[]](0x00, 0x40, 0x39, 0x87, 0x2E, 0xE1, 0xFE, 0xFF)
-                    } catch {
-                        Write-Host "[i] Could not set pKIExpirationPeriod attribute" -ForegroundColor Yellow
-                    }
-                    
-                    try {
-                        $templateAttributes['pKIOverlapPeriod'] = [byte[]](0x00, 0x80, 0xA6, 0x0A, 0xFF, 0xDE, 0xFF, 0xFF)
-                    } catch {
-                        Write-Host "[i] Could not set pKIOverlapPeriod attribute" -ForegroundColor Yellow
+                    # Log the attributes with their value types
+                    Write-Host "`n[i] Final attribute list to create template:" -ForegroundColor Cyan
+                    foreach ($key in $templateAttributes.Keys) {
+                        $value = $templateAttributes[$key]
+                        $valueType = if ($value -is [Array]) { "Array[$($value.Count)]" } else { $value.GetType().Name }
+                        $isSingleValued = $attributeDefinitions[$key].IsSingleValued
+                        $singleValuedText = if ($isSingleValued) { "SINGLE-VALUED" } else { "MULTI-VALUED" }
+                        
+                        Write-Host "   - $key = $value ($valueType) [$singleValuedText]" -ForegroundColor Gray
                     }
                     
                     # Create the template object with detailed error handling
                     try {
-                        Write-Host "[i] Attempting to create certificate template with attributes:" -ForegroundColor Cyan
-                        $templateAttributes.Keys | ForEach-Object {
-                            Write-Host "   - $_ = $($templateAttributes[$_])" -ForegroundColor Gray
-                        }
+                        Write-Host "`n[i] Creating PKI certificate template object..." -ForegroundColor Cyan
                         
                         New-ADObject -Name $templateName -Type "pKICertificateTemplate" -Path $containerDN -OtherAttributes $templateAttributes
                         Write-Host "[+] Created PKI certificate template: $templateDN" -ForegroundColor Green
                         $createdObjectDNs += $templateDN  # Add to our tracking list
-                        Start-Sleep -Seconds 2  # Brief delay
                     } catch {
                         $errorMsg = $_.Exception.Message
                         $errorDetails = if($_.Exception.InnerException) { $_.Exception.InnerException.Message } else { "No additional details" }
@@ -440,16 +495,64 @@ function CreateSpecialCanaries {
                         Write-Host "[!] Failed to create PKI certificate template" -ForegroundColor Red
                         Write-Host "    Error: $errorMsg" -ForegroundColor Red
                         Write-Host "    Details: $errorDetails" -ForegroundColor Red
-                        Write-Host "    This may indicate the AD schema does not support PKI certificate templates." -ForegroundColor Red
-                        Write-Host "    Please ensure the AD Certificate Services schema extensions are installed." -ForegroundColor Red
                         
-                        # Do not create placeholders - skip this object
-                        Write-Host "[i] Skipping this certificate template - no placeholder will be created" -ForegroundColor Yellow
+                        # Parse the error message to see if it mentions which attribute is causing the problem
+                        if ($errorMsg -match "attribute that can have only one value") {
+                            Write-Host "`n[i] TROUBLESHOOTING ADVICE:" -ForegroundColor Cyan
+                            Write-Host "    The error suggests we're trying to provide multiple values for a single-valued attribute." -ForegroundColor Cyan
+                            Write-Host "    Let's try to create the template with fewer attributes to pinpoint the problem." -ForegroundColor Cyan
+                            
+                            # Try a more minimal template with only essential attributes
+                            $minimalAttributes = @{
+                                'displayName' = $templateName
+                            }
+                            
+                            try {
+                                Write-Host "`n[i] Attempting to create minimal template with just displayName..." -ForegroundColor Yellow
+                                New-ADObject -Name "${templateName}-minimal" -Type "pKICertificateTemplate" -Path $containerDN -OtherAttributes $minimalAttributes
+                                Write-Host "[+] Minimal template created successfully! This suggests other attributes are causing the issue." -ForegroundColor Green
+                                
+                                # Try adding attributes one by one to identify the problematic one
+                                $problematicAttributes = @()
+                                
+                                foreach ($key in $templateAttributes.Keys) {
+                                    if ($key -eq 'displayName') { continue }
+                                    
+                                    $testAttributes = $minimalAttributes.Clone()
+                                    $testAttributes[$key] = $templateAttributes[$key]
+                                    
+                                    try {
+                                        Write-Host "[i] Testing attribute: $key" -ForegroundColor Yellow
+                                        New-ADObject -Name "${templateName}-test-$key" -Type "pKICertificateTemplate" -Path $containerDN -OtherAttributes $testAttributes -ErrorAction Stop
+                                        Write-Host "[+] Attribute $key is OK" -ForegroundColor Green
+                                    } catch {
+                                        Write-Host "[!] Attribute $key causes error: $($_.Exception.Message)" -ForegroundColor Red
+                                        $problematicAttributes += $key
+                                    }
+                                }
+                                
+                                if ($problematicAttributes.Count -gt 0) {
+                                    Write-Host "`n[!] Problematic attributes identified:" -ForegroundColor Red
+                                    foreach ($attr in $problematicAttributes) {
+                                        Write-Host "   - $attr = $($templateAttributes[$attr])" -ForegroundColor Red
+                                    }
+                                }
+                                
+                                # Use the minimal template as our created object
+                                $templateDN = "CN=${templateName}-minimal,$containerDN"
+                                $createdObjectDNs += $templateDN
+                                
+                            } catch {
+                                Write-Host "[!] Even minimal template creation failed: $($_.Exception.Message)" -ForegroundColor Red
+                                Write-Host "    This suggests fundamental issues with creating PKI certificate templates in this environment." -ForegroundColor Red
+                            }
+                        }
+                        
+                        # Skip to the next template
                         continue
                     }
                 } catch {
-                    Write-Host "[!] Error in certificate template creation process: $($_.Exception.Message)" -ForegroundColor Red
-                    Write-Host "[i] Skipping this certificate template - no placeholder will be created" -ForegroundColor Yellow
+                    Write-Host "[!] Error during PKI template attribute analysis: $($_.Exception.Message)" -ForegroundColor Red
                     continue  # Skip to the next object
                 }
             }
