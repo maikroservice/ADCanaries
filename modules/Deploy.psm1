@@ -325,19 +325,7 @@ function CreateSpecialCanaries {
             New-ADObject -Name $containerName -Type "container" -Path $containerPath -Description "Container for special canary objects"
             Write-Host "[+] Created special objects container: $containerDN" -ForegroundColor Green
             $containerExists = $true
-            
-            # Wait longer for the container to be available
-            Write-Host "[i] Waiting for container to be available..." -ForegroundColor Cyan
-            Start-Sleep -Seconds 5
-            
-            # Verify the container was created
-            try {
-                $verifyContainer = Get-ADObject -Identity $containerDN -ErrorAction Stop
-                Write-Host "[+] Container verified: $containerDN" -ForegroundColor Green
-            } catch {
-                Write-Host "[!] Container verification failed: $($_.Exception.Message)" -ForegroundColor Red
-                $containerExists = $false
-            }
+            Start-Sleep -Seconds 3  # Brief delay to ensure container is available
         } catch {
             Write-Host "[!] Failed to create special objects container: $($_.Exception.Message)" -ForegroundColor Red
             $containerExists = $false
@@ -350,8 +338,8 @@ function CreateSpecialCanaries {
         $specialTypes = @('pKICertificateTemplate', 'domainPolicy')
         $specialObjects = $SpecialCanaries | Where-Object { $specialTypes -contains $_.Type }
         
-        # Create all special objects first
-        $createdSpecialObjects = @()
+        # Track all created objects for later permission application
+        $createdObjectDNs = @()
         
         foreach ($specialObject in $specialObjects) {
             $objectName = $specialObject.Name
@@ -366,11 +354,7 @@ function CreateSpecialCanaries {
                 Get-ADObject -Identity $objectDN -ErrorAction Stop
                 $objectExists = $true
                 Write-Host "[-] Special object already exists: $objectDN" -ForegroundColor Yellow
-                $createdSpecialObjects += @{
-                    DN = $objectDN
-                    Name = $objectName
-                    Type = $objectType
-                }
+                $createdObjectDNs += $objectDN  # Add to our tracking list
             } catch {
                 $objectExists = $false
             }
@@ -380,72 +364,76 @@ function CreateSpecialCanaries {
                     # Create the placeholder container
                     New-ADObject -Name $objectName -Type "container" -Path $containerDN -Description "$($specialObject.Description) (placeholder for $objectType)"
                     Write-Host "[+] Created placeholder for $objectType : $objectDN" -ForegroundColor Green
-                    
-                    # Add to our list of created objects
-                    $createdSpecialObjects += @{
-                        DN = $objectDN
-                        Name = $objectName
-                        Type = $objectType
-                    }
+                    $createdObjectDNs += $objectDN  # Add to our tracking list
+                    Start-Sleep -Seconds 2  # Brief delay
                 } catch {
                     Write-Host "[!] Failed to create $objectType placeholder: $($_.Exception.Message)" -ForegroundColor Red
+                    continue  # Skip to the next object if creation fails
                 }
             }
-        }
-        
-        # Wait for AD to fully propagate all created objects
-        Write-Host "[i] Waiting for AD to fully propagate objects..." -ForegroundColor Cyan
-        Start-Sleep -Seconds 5
-        
-        # Now add all objects to the group in a separate loop
-        foreach ($specialObject in $createdSpecialObjects) {
-            $objectDN = $specialObject.DN
-            $objectName = $specialObject.Name
-            $objectType = $specialObject.Type
             
-            # Make sure the object exists before trying to add it to the group
-            $objectConfirmed = $false
+            # First add audit SACL only - don't apply restrictive permissions yet
             try {
-                $confirmedObject = Get-ADObject -Identity $objectDN -ErrorAction Stop
-                $objectConfirmed = $true
-                Write-Host "[+] Confirmed object exists: $objectDN" -ForegroundColor Green
+                SetAuditSACL -DistinguishedName $objectDN
+                Write-Host "[+] Applied audit SACL to $objectDN" -ForegroundColor Green
             } catch {
-                Write-Host "[!] Could not confirm object exists: $objectDN" -ForegroundColor Red
-                $objectConfirmed = $false
+                Write-Host "[!] Could not apply audit SACL: $($_.Exception.Message)" -ForegroundColor Yellow
             }
             
-            if ($objectConfirmed) {
-                # Add to group
+            # Add to group - with non-restrictive permissions in place
+            try {
+                Add-ADGroupMember -Identity $CanaryGroup.distinguishedName -Members $objectDN -ErrorAction Stop
+                Write-Host "[+] Added $objectType to group" -ForegroundColor Green
+            } catch {
+                Write-Host "[!] Could not add $objectType to group: $($_.Exception.Message)" -ForegroundColor Red
+                # Try alternative method if the first fails
                 try {
-                    Add-ADGroupMember -Identity $CanaryGroup.distinguishedName -Members $objectDN -ErrorAction Stop
-                    Write-Host "[+] Added $objectType to group" -ForegroundColor Green
+                    Write-Host "[i] Trying alternative method to add to group..." -ForegroundColor Cyan
+                    $group = Get-ADGroup -Identity $CanaryGroup.distinguishedName -Properties member
+                    Set-ADGroup -Identity $CanaryGroup.distinguishedName -Add @{member=$objectDN}
+                    Write-Host "[+] Added $objectType to group using alternative method" -ForegroundColor Green
                 } catch {
-                    Write-Host "[!] Could not add $objectType to group: $($_.Exception.Message)" -ForegroundColor Yellow
+                    Write-Host "[!] Alternative method also failed: $($_.Exception.Message)" -ForegroundColor Red
                 }
-                
-                # Record in output file
-                try {
-                    $createdObject = Get-ADObject -Identity $objectDN -Properties * -ErrorAction Stop
-                    $name = $createdObject.Name
-                    $guid = $createdObject.ObjectGUID
-                    Add-Content -Path $Output "N/A,$guid,$name"
-                    
-                    # Apply audit SACL (but don't apply deny permissions yet)
-                    SetAuditSACL -DistinguishedName $objectDN
-                } catch {
-                    Write-Host "[!] Could not get $objectType properties: $($_.Exception.Message)" -ForegroundColor Yellow
-                }
+            }
+            
+            # Record in output file
+            try {
+                $createdObject = Get-ADObject -Identity $objectDN -Properties * -ErrorAction Stop
+                $name = $createdObject.Name
+                $guid = $createdObject.ObjectGUID
+                Add-Content -Path $Output "N/A,$guid,$name"
+            } catch {
+                Write-Host "[!] Could not get $objectType properties: $($_.Exception.Message)" -ForegroundColor Yellow
             }
         }
         
-        # Now apply DenyAll permissions to the container and all objects inside it
-        try {
-            Write-Host "[i] Applying permissions to special objects container" -ForegroundColor Cyan
-            DenyAllOnCanariesAndChangeOwner -DistinguishedName $containerDN -Owner $Owner
-            Write-Host "[+] Applied permissions to special objects container" -ForegroundColor Green
-        } catch {
-            Write-Host "[!] Failed to apply permissions to special objects container: $($_.Exception.Message)" -ForegroundColor Red
+        # Now that all objects are created and added to groups, apply the restrictive permissions
+        Write-Host "`n[i] All special objects created and added to groups. Now applying restrictive permissions..." -ForegroundColor Cyan
+        
+        # First apply permissions to all individual objects
+        foreach ($objectDN in $createdObjectDNs) {
+            try {
+                # First disable protection from accidental deletion
+                Set-ADObject -Identity $objectDN -ProtectedFromAccidentalDeletion $False
+                
+                # Then apply restrictive permissions
+                DenyAllOnCanariesAndChangeOwner -DistinguishedName $objectDN -Owner $Owner
+                Write-Host "[+] Applied restrictive permissions to: $objectDN" -ForegroundColor Green
+            } catch {
+                Write-Host "[!] Failed to apply restrictive permissions to $objectDN: $($_.Exception.Message)" -ForegroundColor Red
+            }
         }
+        
+        # Finally apply permissions to the container
+        try {
+            DenyAllOnCanariesAndChangeOwner -DistinguishedName $containerDN -Owner $Owner
+            Write-Host "[+] Applied restrictive permissions to container: $containerDN" -ForegroundColor Green
+        } catch {
+            Write-Host "[!] Failed to apply permissions to container: $($_.Exception.Message)" -ForegroundColor Red
+        }
+        
+        Write-Host "[i] Completed special objects deployment with delayed permission application" -ForegroundColor Cyan
     }
 }
 
