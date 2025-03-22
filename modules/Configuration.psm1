@@ -60,29 +60,40 @@ function PopulateConf {
     param($Config, $ParentOU, $CanaryGroupName, $Owner, $ADGroups)
     ValidateAction
 
+    # Create the configuration object
     $ConfigJsonObject = @{}
     $ConfigJsonObject.Configuration = @{}
+    
+    # Set the CanaryOwner
     $ConfigJsonObject.Configuration.CanaryOwner = $Owner
 
     # Check if ParentOU exists
-    if(-not (Get-ADObject -Filter *).DistinguishedName -contains $ParentOU) {
+    if(-not (Get-ADObject -Filter {DistinguishedName -eq $ParentOU})) {
         Write-Host "[!] $ParentOU not found in AD Objects please provide a valid Parent OU"
         exit $false
     }
     
     # Overwrite output file
-    Remove-Item -Path $Config -ErrorAction SilentlyContinue
+    if (Test-Path $Config) {
+        Remove-Item -Path $Config -ErrorAction SilentlyContinue
+    }
 
+    # Configure the Canary OU
     $ConfigJsonObject.Configuration.CanaryOU = @{}
     $ConfigJsonObject.Configuration.CanaryOU.Name = "$CanaryGroupName"
-    $ConfigJsonObject.Configuration.CanaryOU.Type = "organizationalUnit"
+    $ConfigJsonObject.Configuration.CanaryOU.Type = "organizationalUnit"  # Using the correct type
     $ConfigJsonObject.Configuration.CanaryOU.Path = "$ParentOU"
     $ConfigJsonObject.Configuration.CanaryOU.OtherAttributes = @{}
     $ConfigJsonObject.Configuration.CanaryOU.Description = "[ADCanaries] Default OU"
     $ConfigJsonObject.Configuration.CanaryOU.ProtectedFromAccidentalDeletion = 1
 
+    # DIAGNOSTIC: Print out the exact OU configuration
+    Write-Host "DIAGNOSTIC: CanaryOU Type = $($ConfigJsonObject.Configuration.CanaryOU.Type)"
+
+    # Set the path for canaries within the OU
     $CanariesPath = "OU=$CanaryGroupName,$ParentOU"
 
+    # Configure the Canary Group
     $ConfigJsonObject.Configuration.CanaryGroup = @{}
     $ConfigJsonObject.Configuration.CanaryGroup.Name = "$CanaryGroupName"
     $ConfigJsonObject.Configuration.CanaryGroup.Type = "group"
@@ -91,14 +102,21 @@ function PopulateConf {
     $ConfigJsonObject.Configuration.CanaryGroup.Description = "[ADCanaries] Default group"
     $ConfigJsonObject.Configuration.CanaryGroup.ProtectedFromAccidentalDeletion = 1
 
+    # Initialize the Canaries array
     $ConfigJsonObject.Canaries = New-Object System.Collections.ArrayList
 
+    # Add default canaries
     DefaultCanaries -ConfigJsonObject $ConfigJsonObject -ParentOU $CanariesPath
     
     # Write the configuration to file
-    $ConfigJsonObject | ConvertTo-Json -Depth 20 | Set-Content -Path $Config
+    $ConfigJson = $ConfigJsonObject | ConvertTo-Json -Depth 20
+    Set-Content -Path $Config -Value $ConfigJson
+    
+    # DIAGNOSTIC: Load the config file back to verify what was written
+    $LoadedConfig = Get-Content -Path $Config | ConvertFrom-Json
+    Write-Host "DIAGNOSTIC: Loaded CanaryOU Type = $($LoadedConfig.Configuration.CanaryOU.Type)"
 
-    Write-Host "[*] Configuration saved to: $Config"
+    Write-Host "[*] Configuration file created: $Config"
 }
 
 # Export functions
