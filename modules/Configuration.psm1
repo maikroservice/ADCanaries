@@ -87,9 +87,6 @@ function PopulateConf {
     $ConfigJsonObject.Configuration.CanaryOU.Description = "[ADCanaries] Default OU"
     $ConfigJsonObject.Configuration.CanaryOU.ProtectedFromAccidentalDeletion = 1
 
-    # DIAGNOSTIC: Print out the exact OU configuration
-    Write-Host "DIAGNOSTIC: CanaryOU Type = $($ConfigJsonObject.Configuration.CanaryOU.Type)"
-
     # Set the path for canaries within the OU
     $CanariesPath = "OU=$CanaryGroupName,$ParentOU"
 
@@ -112,10 +109,6 @@ function PopulateConf {
     $ConfigJson = $ConfigJsonObject | ConvertTo-Json -Depth 20
     Set-Content -Path $Config -Value $ConfigJson
     
-    # DIAGNOSTIC: Load the config file back to verify what was written
-    $LoadedConfig = Get-Content -Path $Config | ConvertFrom-Json
-    Write-Host "DIAGNOSTIC: Loaded CanaryOU Type = $($LoadedConfig.Configuration.CanaryOU.Type)"
-
     Write-Host "[*] Configuration file created: $Config"
 }
 
