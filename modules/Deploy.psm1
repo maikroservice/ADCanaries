@@ -443,7 +443,7 @@ function DeployCanaries {
                 try {
                     # Create the placeholder container
                     New-ADObject -Name $objectName -Type "container" -Path $containerDN -Description "$($specialObject.Description) (placeholder for $objectType)"
-                    Write-Host "[+] Created placeholder for $objectType: $objectDN" -ForegroundColor Green
+                    Write-Host "[+] Created placeholder for $objectType : $objectDN" -ForegroundColor Green
                     
                     # Wait for object to be available
                     Start-Sleep -Seconds 2
